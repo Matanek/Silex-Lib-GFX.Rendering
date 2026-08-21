@@ -1,0 +1,75 @@
+use GFX.Application
+use GFX.Application.Plugin as PluginProtocol
+use GFX.Application.Schedule
+use GFX.GPU
+use GFX.GPU.Plugin as GPUPlugin
+use GFX.Rendering.Renderer
+use GFX.Rendering.Antialiasing.Antialiasing
+use GFX.Rendering.Multisampling.Multisampling
+
+public struct Plugin:PluginProtocol {
+    struct Settings {
+        var clear:GFX.Color
+        var antialiasing:Antialiasing
+
+        init(
+            clear:GFX.Color = GFX.Color(r:0.055, g:0.075, b:0.105, a:1.0),
+            antialiasing:Antialiasing? = null
+        ) {
+            self.clear = clear
+            self.antialiasing = Antialiasing.msaa_4x
+            if let selected = antialiasing { self.antialiasing = selected }
+        }
+    }
+
+    private let settings:Settings
+
+    init(settings:Settings = Settings()) { self.settings = settings }
+
+    func id() str { return "GFX.Rendering.Plugin" }
+
+    func build(application:&Application) {
+        application.add_plugin(GPUPlugin())
+        application.add_resource(Multisampling(self.settings.antialiasing))
+        application.add_resource(Renderer(self.settings.clear))
+        application.add_system(Schedule.startup, resolve_multisampling)
+        application.add_system(Schedule.render, begin_frame_stats)
+        application.add_after_system(Schedule.render, render_frame)
+        application.add_system(Schedule.shutdown, stop_renderer)
+    }
+}
+
+func resolve_multisampling(
+    device:@GPU.Device,
+    surface:@GPU.Surface,
+    multisampling:&Multisampling,
+    renderer:&Renderer
+) {
+    multisampling.resolve(device, surface.format(), renderer.requires_depth())
+    renderer.set_samples(multisampling.samples())
+}
+
+func begin_frame_stats(device:&GPU.Device) {
+    device.reset_command_stats()
+}
+
+func render_frame(application:Application) {
+    var resources = application.resources()
+    var stored = resources.remove<Renderer>()
+    if var renderer = stored {
+        {
+            let device = resources.get<GPU.Device>()
+            let surface = resources.get<GPU.Surface>()
+            renderer.render(device, surface, application)
+        }
+        resources.insert(renderer)
+        return
+    }
+    panic("GFX.Rendering has no renderer")
+}
+
+func stop_renderer(application:Application) {
+    var resources = application.resources()
+    var removed = resources.remove<Renderer>()
+    assert(removed != null)
+}

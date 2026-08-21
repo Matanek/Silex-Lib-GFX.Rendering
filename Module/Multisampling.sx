@@ -1,0 +1,51 @@
+use GFX.GPU
+use GFX.Rendering.Antialiasing.Antialiasing
+use GFX.Rendering.Antialiasing.requested_samples
+
+package class Multisampling {
+    private let configured:Antialiasing
+    private var active:GPU.Samples
+
+    init(configured:Antialiasing) {
+        self.configured = configured
+        self.active = GPU.Samples.one
+    }
+
+    func resolve(
+        device:@GPU.Device,
+        color:GPU.TextureFormat,
+        depth:bool
+    ) {
+        let requested = requested_samples(self.configured)
+        self.active = GPU.Samples.one
+        if requested == GPU.Samples.eight && self.supports(
+            device, color, GPU.Samples.eight, depth
+        ) {
+            self.active = GPU.Samples.eight
+            return
+        }
+        if (requested == GPU.Samples.eight || requested == GPU.Samples.four) &&
+            self.supports(device, color, GPU.Samples.four, depth)
+        {
+            self.active = GPU.Samples.four
+            return
+        }
+        if requested != GPU.Samples.one && self.supports(
+            device, color, GPU.Samples.two, depth
+        ) {
+            self.active = GPU.Samples.two
+        }
+    }
+
+    func samples() GPU.Samples { return self.active }
+
+    private func supports(
+        device:@GPU.Device,
+        color:GPU.TextureFormat,
+        samples:GPU.Samples,
+        depth:bool
+    ) bool {
+        if !device.supports(color, samples) { return false }
+        return !depth || device.supports(GPU.TextureFormat.depth16, samples)
+    }
+}

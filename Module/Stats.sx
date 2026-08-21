@@ -1,0 +1,76 @@
+use GFX.GPU
+
+public struct Stats {
+    private var rendered_frames:int
+    private var executed_passes:int
+    private var gpu_render_passes:int
+    private var submitted_draw_calls:int
+    private var bound_pipelines:int
+    private var submitted_triangles:int
+    private var submitted_vertices:int
+    private var submitted_indices:int
+    private var submitted_instances:int
+    private var pushed_uniform_bytes:int
+    private var bound_textures:int
+    private var submitted_shadow_draw_calls:int
+    private var submitted_shadow_triangles:int
+    private var submitted_shadow_instances:int
+
+    init() {
+        self.rendered_frames = 0
+        self.executed_passes = 0
+        self.gpu_render_passes = 0
+        self.submitted_draw_calls = 0
+        self.bound_pipelines = 0
+        self.submitted_triangles = 0
+        self.submitted_vertices = 0
+        self.submitted_indices = 0
+        self.submitted_instances = 0
+        self.pushed_uniform_bytes = 0
+        self.bound_textures = 0
+        self.submitted_shadow_draw_calls = 0
+        self.submitted_shadow_triangles = 0
+        self.submitted_shadow_instances = 0
+    }
+
+    func frames() int { return self.rendered_frames }
+    func passes() int { return self.executed_passes }
+    func render_passes() int { return self.gpu_render_passes }
+    func draw_calls() int { return self.submitted_draw_calls }
+    func pipeline_bindings() int { return self.bound_pipelines }
+    func triangles() int { return self.submitted_triangles }
+    func vertices() int { return self.submitted_vertices }
+    func indices() int { return self.submitted_indices }
+    func instances() int { return self.submitted_instances }
+    func uniform_bytes() int { return self.pushed_uniform_bytes }
+    func texture_bindings() int { return self.bound_textures }
+    func color_draw_calls() int {
+        return self.submitted_draw_calls - self.submitted_shadow_draw_calls
+    }
+    func shadow_draw_calls() int { return self.submitted_shadow_draw_calls }
+    func color_triangles() int {
+        return self.submitted_triangles - self.submitted_shadow_triangles
+    }
+    func shadow_triangles() int { return self.submitted_shadow_triangles }
+    func color_instances() int {
+        return self.submitted_instances - self.submitted_shadow_instances
+    }
+    func shadow_instances() int { return self.submitted_shadow_instances }
+
+    module func record_frame(pass_count:int, commands:GPU.CommandStatistics) {
+        self.rendered_frames++
+        self.executed_passes = pass_count
+        self.gpu_render_passes = commands.render_passes
+        self.submitted_draw_calls = commands.draw_calls
+        self.bound_pipelines = commands.pipeline_bindings
+        self.submitted_triangles = commands.triangles
+        self.submitted_vertices = commands.vertices
+        self.submitted_indices = commands.indices
+        self.submitted_instances = commands.instances
+        self.pushed_uniform_bytes = commands.uniform_bytes
+        self.bound_textures = commands.texture_bindings
+        self.submitted_shadow_draw_calls = commands.shadow_draw_calls
+        self.submitted_shadow_triangles = commands.shadow_triangles
+        self.submitted_shadow_instances = commands.shadow_instances
+    }
+}

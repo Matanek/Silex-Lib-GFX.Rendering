@@ -1,0 +1,385 @@
+use GFX.GPU
+use GFX.Rendering.FrameGraph.Pass
+use GFX.Rendering.FrameGraph.Physical.AliasGroup as AliasGroup
+use GFX.Rendering.FrameGraph.Resource
+
+struct Edge {
+    let from:int
+    let to:int
+}
+
+public class FrameGraph {
+    private var resources:Resource.Record[]
+    private var passes:Pass.Record[]
+    private var plan:int[]
+    private var aliases:AliasGroup[]
+    private var dirty:bool
+    private var compile_error:str?
+
+    init() {
+        self.resources = []
+        self.passes = []
+        self.plan = []
+        self.aliases = []
+        self.dirty = true
+        self.compile_error = null
+    }
+
+    func import_texture(name:str, descriptor:Resource.TextureDescriptor) Resource.Texture {
+        return self.add_resource(name, Resource.Origin.imported, false, descriptor)
+    }
+
+    func create_texture(
+        name:str,
+        descriptor:Resource.TextureDescriptor,
+        transient:bool = true
+    ) Resource.Texture {
+        return self.add_resource(name, Resource.Origin.created, transient, descriptor)
+    }
+
+    func add_pass(name:str) Pass.Pass {
+        if name.count() == 0 { panic("GFX.Rendering.FrameGraph pass name cannot be empty") }
+        for current in self.passes {
+            if current.name == name { panic("GFX.Rendering.FrameGraph pass is already installed: " + name) }
+        }
+        self.passes.append(Pass.Record(name))
+        self.dirty = true
+        return Pass.Pass(self.passes.count() - 1)
+    }
+
+    func read(pass:Pass.Pass, resource:Resource.Texture) {
+        self.add_usage(pass, resource, Resource.Access.read)
+    }
+
+    func write(pass:Pass.Pass, resource:Resource.Texture) {
+        self.add_usage(pass, resource, Resource.Access.write)
+    }
+
+    func read_write(pass:Pass.Pass, resource:Resource.Texture) {
+        self.add_usage(pass, resource, Resource.Access.read_write)
+    }
+
+    func depends(pass:Pass.Pass, dependency:Pass.Pass) {
+        self.require_pass(pass)
+        self.require_pass(dependency)
+        if pass.index == dependency.index { panic("GFX.Rendering.FrameGraph pass cannot depend on itself") }
+        var dependencies = self.passes[pass.index].dependencies
+        for current in dependencies {
+            if current.index == dependency.index { return }
+        }
+        dependencies.append(dependency)
+        self.passes[pass.index].dependencies = dependencies
+        self.dirty = true
+    }
+
+    func compile() bool {
+        if !self.dirty { return self.compile_error == null }
+        self.compile_error = null
+        self.plan = []
+        self.aliases = []
+        var resource_index = 0
+        while resource_index < self.resources.count() {
+            self.resources[resource_index].first_pass = -1
+            self.resources[resource_index].last_pass = -1
+            self.resources[resource_index].alias_group = -1
+            resource_index++
+        }
+        var edges:Edge[] = []
+
+        for current in self.passes {
+            for dependency in current.dependencies {
+                add_edge(edges, dependency.index, self.pass_index(current.name))
+            }
+        }
+        if !self.add_resource_edges(edges) { return false }
+        if !self.sort(edges) { return false }
+        if !self.compile_lifetimes() { return false }
+        self.compile_aliases()
+        self.dirty = false
+        return true
+    }
+
+    func require_compiled() {
+        if self.compile() { return }
+        if let message = self.compile_error { panic("GFX.Rendering.FrameGraph " + message) }
+        panic("GFX.Rendering.FrameGraph could not compile")
+    }
+
+    func pass_count() int { return self.passes.count() }
+    func texture_count() int { return self.resources.count() }
+    func transient_slot_count() int { return self.aliases.count() }
+    func plan_count() int { return self.plan.count() }
+
+    func plan_pass(index:int) Pass.Pass {
+        if index < 0 || index >= self.plan.count() { panic("GFX.Rendering.FrameGraph plan index is invalid") }
+        return Pass.Pass(self.plan[index])
+    }
+
+    func pass_name(pass:Pass.Pass) str {
+        self.require_pass(pass)
+        return self.passes[pass.index].name
+    }
+
+    func texture_name(texture:Resource.Texture) str {
+        self.require_resource(texture)
+        return self.resources[texture.index].name
+    }
+
+    func transient_slot(texture:Resource.Texture) int {
+        self.require_compiled()
+        self.require_resource(texture)
+        return self.resources[texture.index].alias_group
+    }
+
+    func transient_descriptor(slot:int) Resource.TextureDescriptor {
+        self.require_compiled()
+        if slot < 0 || slot >= self.aliases.count() {
+            panic("GFX.Rendering.FrameGraph transient slot is invalid")
+        }
+        let alias = self.aliases[slot]
+        return Resource.TextureDescriptor(alias.format, alias.usage)
+    }
+
+    func error_message() str {
+        if let message = self.compile_error { return message }
+        return ""
+    }
+
+    private func add_resource(
+        name:str,
+        origin:Resource.Origin,
+        transient:bool,
+        descriptor:Resource.TextureDescriptor
+    ) Resource.Texture {
+        if name.count() == 0 { panic("GFX.Rendering.FrameGraph resource name cannot be empty") }
+        var index = 0
+        while index < self.resources.count() {
+            if self.resources[index].name == name {
+                if self.resources[index].origin != origin {
+                    panic("GFX.Rendering.FrameGraph resource has conflicting origins: " + name)
+                }
+                return Resource.Texture(index)
+            }
+            index++
+        }
+        self.resources.append(Resource.Record(name, origin, transient, descriptor))
+        self.dirty = true
+        return Resource.Texture(self.resources.count() - 1)
+    }
+
+    private func add_usage(
+        pass:Pass.Pass,
+        resource:Resource.Texture,
+        access:Resource.Access
+    ) {
+        self.require_pass(pass)
+        self.require_resource(resource)
+        var usages = self.passes[pass.index].usages
+        for current in usages {
+            if current.resource.index == resource.index {
+                panic("GFX.Rendering.FrameGraph pass declares the same resource more than once")
+            }
+        }
+        usages.append(Resource.Usage(resource, access))
+        self.passes[pass.index].usages = usages
+        self.dirty = true
+    }
+
+    private func add_resource_edges(edges:&Edge[]) bool {
+        var resource_index = 0
+        while resource_index < self.resources.count() {
+            var writers:int[] = []
+            var readers:int[] = []
+            var pass_index = 0
+            while pass_index < self.passes.count() {
+                for usage in self.passes[pass_index].usages {
+                    if usage.resource.index == resource_index {
+                        if usage.access != Resource.Access.read { writers.append(pass_index) }
+                        if usage.access != Resource.Access.write { readers.append(pass_index) }
+                    }
+                }
+                pass_index++
+            }
+            if writers.count() == 0 && readers.count() == 0 {
+                if self.resources[resource_index].origin == Resource.Origin.created {
+                    self.fail("created resource is declared but never used: " + self.resources[resource_index].name)
+                    return false
+                }
+                resource_index++
+                continue
+            }
+            if writers.count() == 0 && self.resources[resource_index].origin == Resource.Origin.created {
+                self.fail("created resource is read before any pass writes it: " + self.resources[resource_index].name)
+                return false
+            }
+            for first_writer in writers {
+                for second_writer in writers {
+                    if self.ordered_before(first_writer, second_writer) {
+                        add_edge(edges, first_writer, second_writer)
+                    }
+                }
+            }
+            var resource_valid = true
+            for reader in readers {
+                var selected = -1
+                for writer in writers {
+                    if writer != reader && self.ordered_before(writer, reader) {
+                        if selected < 0 || self.ordered_before(selected, writer) { selected = writer }
+                    }
+                }
+                if selected < 0 && self.resources[resource_index].origin == Resource.Origin.created {
+                    if writers.count() == 1 { selected = writers[0] }
+                    else {
+                        self.fail("created resource has an ambiguous read before write: " + self.resources[resource_index].name)
+                        resource_valid = false
+                    }
+                }
+                if resource_valid && selected >= 0 && selected != reader { add_edge(edges, selected, reader) }
+            }
+            if !resource_valid { return false }
+            resource_index++
+        }
+        return true
+    }
+
+    private func sort(edges:Edge[]) bool {
+        var indegrees:int[] = []
+        var consumed:bool[] = []
+        for current in self.passes {
+            indegrees.append(0)
+            consumed.append(false)
+        }
+        for edge in edges { indegrees[edge.to]++ }
+        while self.plan.count() < self.passes.count() {
+            var found = -1
+            var index = 0
+            while index < self.passes.count() {
+                if !consumed[index] && indegrees[index] == 0 {
+                    found = index
+                    break
+                }
+                index++
+            }
+            if found < 0 {
+                self.fail("pass dependencies contain a cycle")
+                return false
+            }
+            consumed[found] = true
+            self.plan.append(found)
+            for edge in edges {
+                if edge.from == found { indegrees[edge.to]-- }
+            }
+        }
+        return true
+    }
+
+    private func compile_lifetimes() bool {
+        var execution_index = 0
+        while execution_index < self.plan.count() {
+            let current = self.passes[self.plan[execution_index]]
+            for usage in current.usages {
+                let resource_index = usage.resource.index
+                if self.resources[resource_index].first_pass < 0 {
+                    self.resources[resource_index].first_pass = execution_index
+                }
+                self.resources[resource_index].last_pass = execution_index
+            }
+            execution_index++
+        }
+        return true
+    }
+
+    private func compile_aliases() {
+        var resource_index = 0
+        while resource_index < self.resources.count() {
+            let resource = self.resources[resource_index]
+            if resource.origin == Resource.Origin.created && resource.transient {
+                let flags = usage_signature(resource.texture.usage)
+                var selected = -1
+                var alias_index = 0
+                while alias_index < self.aliases.count() {
+                    let alias = self.aliases[alias_index]
+                    if alias.last_pass < resource.first_pass && alias.format == resource.texture.format && alias.usage_flags == flags {
+                        selected = alias_index
+                        break
+                    }
+                    alias_index++
+                }
+                if selected < 0 {
+                    self.aliases.append(AliasGroup(
+                        resource.texture.format,
+                        resource.texture.usage,
+                        flags,
+                        resource.last_pass
+                    ))
+                    selected = self.aliases.count() - 1
+                } else {
+                    self.aliases[selected].last_pass = resource.last_pass
+                }
+                self.resources[resource_index].alias_group = selected
+            }
+            resource_index++
+        }
+    }
+
+    private func fail(message:str) {
+        self.compile_error = message
+        self.dirty = false
+    }
+
+    private func require_pass(handle:Pass.Pass) {
+        if !handle.is_valid() || handle.index >= self.passes.count() {
+            panic("GFX.Rendering.FrameGraph received an invalid pass handle")
+        }
+    }
+
+    private func require_resource(handle:Resource.Texture) {
+        if !handle.is_valid() || handle.index >= self.resources.count() {
+            panic("GFX.Rendering.FrameGraph received an invalid resource handle")
+        }
+    }
+
+    private func pass_index(name:str) int {
+        var index = 0
+        while index < self.passes.count() {
+            if self.passes[index].name == name { return index }
+            index++
+        }
+        return -1
+    }
+
+    private func ordered_before(first:int, second:int) bool {
+        if self.depends_on(second, first) { return true }
+        if self.depends_on(first, second) { return false }
+        return first < second
+    }
+
+    private func depends_on(pass_index:int, dependency_index:int, depth:int = 0) bool {
+        if depth >= self.passes.count() { return false }
+        for dependency in self.passes[pass_index].dependencies {
+            if dependency.index == dependency_index { return true }
+            if self.depends_on(dependency.index, dependency_index, depth + 1) { return true }
+        }
+        return false
+    }
+}
+
+func add_edge(edges:&Edge[], from:int, to:int) {
+    if from == to { return }
+    for edge in edges {
+        if edge.from == from && edge.to == to { return }
+    }
+    edges.append(Edge(from:from, to:to))
+}
+
+func usage_signature(usage:GPU.TextureUsage) uint32 {
+    var result:uint32 = 0
+    if usage.sampled { result += (1 as uint32) << 0 }
+    if usage.color_target { result += (1 as uint32) << 1 }
+    if usage.depth_stencil_target { result += (1 as uint32) << 2 }
+    if usage.graphics_storage { result += (1 as uint32) << 3 }
+    if usage.compute_read { result += (1 as uint32) << 4 }
+    if usage.compute_write { result += (1 as uint32) << 5 }
+    if usage.compute_read_write { result += (1 as uint32) << 6 }
+    return result
+}

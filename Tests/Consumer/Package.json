@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "GFX": "^0.37.0",
+    "GFX.GPU": "^0.1.0",
+    "GFX.Rendering": "^0.1.0"
+  }
+}

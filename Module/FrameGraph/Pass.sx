@@ -1,0 +1,21 @@
+use GFX.Rendering.FrameGraph.Resource.Usage
+
+public struct Pass {
+    module let index:int
+
+    init() { self.index = -1 }
+    module init(index:int) { self.index = index }
+    func is_valid() bool { return self.index >= 0 }
+}
+
+struct Record {
+    let name:str
+    var usages:Usage[]
+    var dependencies:Pass[]
+
+    init(name:str) {
+        self.name = name
+        self.usages = []
+        self.dependencies = []
+    }
+}

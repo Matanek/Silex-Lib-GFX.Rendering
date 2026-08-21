@@ -1,0 +1,23 @@
+use GFX.Application
+use GFX.GPU
+use GFX.Rendering.FrameGraph
+use GFX.Rendering.Renderer.Renderer
+
+struct Probe { var calls:int }
+
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    var probe = resources.get_mut<Probe>()
+    probe.calls++
+}
+
+test "let a capability package register and order its own passes" {
+    var renderer = Renderer()
+    let overlay = renderer.add_pass("ThirdParty.Overlay", draw)
+    let scene = renderer.add_pass("ThirdParty.Scene", draw)
+    renderer.graph().depends(overlay, scene)
+
+    assert(renderer.graph().compile())
+    assert(renderer.graph().pass_name(renderer.graph().plan_pass(0)) == "ThirdParty.Scene")
+    assert(renderer.graph().pass_name(renderer.graph().plan_pass(1)) == "ThirdParty.Overlay")
+}

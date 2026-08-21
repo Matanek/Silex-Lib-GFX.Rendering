@@ -1,0 +1,88 @@
+use GFX.GPU
+use GFX.Rendering.FrameGraph
+
+test "compile dependencies and alias non-overlapping transient textures" {
+    var graph = FrameGraph()
+    let texture = FrameGraph.TextureDescriptor(
+        GPU.TextureFormat.depth16,
+        GPU.TextureUsage.as_depth_target()
+    )
+    let first = graph.create_texture("First depth", texture)
+    let second = graph.create_texture("Second depth", texture)
+
+    let consumer = graph.add_pass("Consumer")
+    graph.read(consumer, first)
+    let producer = graph.add_pass("Producer")
+    graph.write(producer, first)
+    let later = graph.add_pass("Later")
+    graph.write(later, second)
+
+    assert(graph.compile())
+    assert(graph.plan_count() == 3)
+    assert(graph.pass_name(graph.plan_pass(0)) == "Producer")
+    assert(graph.pass_name(graph.plan_pass(1)) == "Consumer")
+    assert(graph.pass_name(graph.plan_pass(2)) == "Later")
+    assert(graph.texture_count() == 2)
+    assert(graph.transient_slot_count() == 1)
+    assert(graph.transient_slot(first) == graph.transient_slot(second))
+    let descriptor = graph.transient_descriptor(0)
+    assert(descriptor.format == GPU.TextureFormat.depth16)
+}
+
+test "diagnose dependency cycles" {
+    var graph = FrameGraph()
+    let first = graph.add_pass("First")
+    let second = graph.add_pass("Second")
+    graph.depends(first, second)
+    graph.depends(second, first)
+
+    assert(!graph.compile())
+    assert(graph.error_message() == "pass dependencies contain a cycle")
+}
+
+test "diagnose a created texture read without a writer" {
+    var graph = FrameGraph()
+    let texture = graph.create_texture(
+        "Uninitialized",
+        FrameGraph.TextureDescriptor(
+            GPU.TextureFormat.depth16,
+            GPU.TextureUsage.as_depth_target()
+        )
+    )
+    let consumer = graph.add_pass("Consumer")
+    graph.read(consumer, texture)
+
+    assert(!graph.compile())
+    assert(graph.error_message() == "created resource is read before any pass writes it: Uninitialized")
+}
+
+test "let a consumer install and order its own passes" {
+    var graph = FrameGraph()
+    let scene = graph.add_pass("ThirdParty.Scene")
+    let overlay = graph.add_pass("Application.Overlay")
+    graph.depends(overlay, scene)
+
+    assert(graph.compile())
+    assert(graph.pass_name(graph.plan_pass(0)) == "ThirdParty.Scene")
+    assert(graph.pass_name(graph.plan_pass(1)) == "Application.Overlay")
+}
+
+test "let explicit dependencies reorder writers registered by separate packages" {
+    var graph = FrameGraph()
+    let surface = graph.import_texture(
+        "Surface",
+        FrameGraph.TextureDescriptor(
+            GPU.TextureFormat.rgba8_unorm,
+            GPU.TextureUsage.as_color_target()
+        )
+    )
+    let overlay = graph.add_pass("Scene2D")
+    graph.read_write(overlay, surface)
+    let scene = graph.add_pass("Scene3D")
+    graph.read_write(scene, surface)
+    graph.depends(overlay, scene)
+
+    assert(graph.compile())
+    assert(graph.pass_name(graph.plan_pass(0)) == "Scene3D")
+    assert(graph.pass_name(graph.plan_pass(1)) == "Scene2D")
+}

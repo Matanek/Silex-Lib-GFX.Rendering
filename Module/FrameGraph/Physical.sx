@@ -1,0 +1,15 @@
+use GFX.GPU
+
+struct AliasGroup {
+    let format:GPU.TextureFormat
+    let usage:GPU.TextureUsage
+    let usage_flags:uint32
+    var last_pass:int
+
+    init(format:GPU.TextureFormat, usage:GPU.TextureUsage, usage_flags:uint32, last_pass:int) {
+        self.format = format
+        self.usage = usage
+        self.usage_flags = usage_flags
+        self.last_pass = last_pass
+    }
+}

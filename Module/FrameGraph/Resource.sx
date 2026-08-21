@@ -1,0 +1,65 @@
+use GFX.GPU
+
+public enum Access:int {
+    read = 0
+    write = 1
+    read_write = 2
+}
+
+public struct Texture {
+    module let index:int
+
+    init() { self.index = -1 }
+    module init(index:int) { self.index = index }
+    func is_valid() bool { return self.index >= 0 }
+}
+
+public struct TextureDescriptor {
+    let format:GPU.TextureFormat
+    let usage:GPU.TextureUsage
+
+    init() {
+        self.format = GPU.TextureFormat.invalid
+        self.usage = GPU.TextureUsage()
+    }
+
+    init(format:GPU.TextureFormat, usage:GPU.TextureUsage) {
+        self.format = format
+        self.usage = usage
+    }
+}
+
+enum Origin:int {
+    created = 0
+    imported = 1
+}
+
+struct Record {
+    let name:str
+    let origin:Origin
+    let transient:bool
+    let texture:TextureDescriptor
+    var first_pass:int
+    var last_pass:int
+    var alias_group:int
+
+    init(name:str, origin:Origin, transient:bool, texture:TextureDescriptor) {
+        self.name = name
+        self.origin = origin
+        self.transient = transient
+        self.texture = texture
+        self.first_pass = -1
+        self.last_pass = -1
+        self.alias_group = -1
+    }
+}
+
+struct Usage {
+    let resource:Texture
+    let access:Access
+
+    init(resource:Texture, access:Access) {
+        self.resource = resource
+        self.access = access
+    }
+}

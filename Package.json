@@ -1,0 +1,9 @@
+{
+  "name": "GFX.Rendering",
+  "version": "0.1.0",
+  "requires": { "silex": ">=0.38.36" },
+  "dependencies": {
+    "GFX": "^0.37.0",
+    "GFX.GPU": "^0.1.0"
+  }
+}

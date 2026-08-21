@@ -1,0 +1,5 @@
+public use GFX.Rendering.FrameGraph.Graph.FrameGraph
+public use GFX.Rendering.FrameGraph.Pass.Pass
+public use GFX.Rendering.FrameGraph.Resource.Access
+public use GFX.Rendering.FrameGraph.Resource.Texture
+public use GFX.Rendering.FrameGraph.Resource.TextureDescriptor

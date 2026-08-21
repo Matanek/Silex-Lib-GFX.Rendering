@@ -1,0 +1,13 @@
+use GFX.Application
+use GFX.GPU
+use GFX.Resources
+
+func draw(pass:@GPU.RenderPass, application:@Application) {}
+
+func main() {
+    var renderer = Resources.Renderer()
+    let overlay = renderer.add_pass("Alternative.Overlay", draw)
+    let scene = renderer.add_pass("Alternative.Scene", draw)
+    renderer.graph().depends(overlay, scene)
+    renderer.graph().require_compiled()
+}

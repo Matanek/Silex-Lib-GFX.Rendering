@@ -1,0 +1,12 @@
+public use GFX.Rendering.Antialiasing.Antialiasing
+public use GFX.Rendering.Renderer.Renderer
+public use GFX.Rendering.Stats.Stats
+
+contribute GFX.Plugins {
+    public use GFX.Rendering.Plugin as Rendering
+    public use GFX.Rendering.Antialiasing.Antialiasing as RenderingAntialiasing
+}
+
+contribute GFX.Resources {
+    public use GFX.Rendering.Renderer as Renderer
+}

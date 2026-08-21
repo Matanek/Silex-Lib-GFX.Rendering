@@ -1,0 +1,15 @@
+use GFX.GPU
+
+public enum Antialiasing {
+    none
+    msaa_2x
+    msaa_4x
+    msaa_8x
+}
+
+package func requested_samples(value:Antialiasing) GPU.Samples {
+    if value == Antialiasing.msaa_2x { return GPU.Samples.two }
+    if value == Antialiasing.msaa_4x { return GPU.Samples.four }
+    if value == Antialiasing.msaa_8x { return GPU.Samples.eight }
+    return GPU.Samples.one
+}

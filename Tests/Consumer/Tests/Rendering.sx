@@ -1,0 +1,24 @@
+use GFX.Plugins
+use GFX.GPU
+use GFX.Rendering
+use GFX.Rendering.FrameGraph
+use GFX.Resources
+
+test "consume Rendering directly and through the GFX catalogs" {
+    var graph = FrameGraph()
+    let first = graph.add_pass("First")
+    let second = graph.add_pass("Second")
+    graph.depends(second, first)
+
+    var direct = Rendering.Renderer()
+    let plugin = Plugins.Rendering(Plugins.Rendering.Settings(
+        antialiasing:Plugins.RenderingAntialiasing.none
+    ))
+    var resource = Resources.Renderer()
+
+    assert(graph.compile())
+    assert(graph.pass_name(graph.plan_pass(0)) == "First")
+    assert(direct.sample_count() == GPU.Samples.one)
+    assert(plugin.id() == "GFX.Rendering.Plugin")
+    assert(resource.stats().frames() == 0)
+}
