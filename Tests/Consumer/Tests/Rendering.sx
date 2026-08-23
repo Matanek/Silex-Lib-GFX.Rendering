@@ -12,7 +12,8 @@ test "consume Rendering directly and through the GFX catalogs" {
 
     var direct = Rendering.Renderer()
     let plugin = Plugins.Rendering(Plugins.Rendering.Settings(
-        antialiasing:Plugins.RenderingAntialiasing.none
+        antialiasing:Plugins.RenderingAntialiasing.none,
+        present_mode:Rendering.PresentMode.immediate
     ))
     var resource = Resources.Renderer()
 

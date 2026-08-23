@@ -30,5 +30,15 @@ the renderer that executes its plan. `GFX.Rendering` contributes
 `Plugins.RenderingAntialiasing`, and `Resources.Renderer` to GFX's open
 catalogs.
 
+Presentation remains synchronized by default. A latency or throughput
+measurement can request immediate presentation explicitly without configuring
+the lower-level GPU plugin itself:
+
+```silex
+application.add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(
+    present_mode:Rendering.PresentMode.immediate
+)))
+```
+
 See [Docs/README.md](Docs/README.md) for renderer composition and
 [Docs/FrameGraph.md](Docs/FrameGraph.md) for explicit graph construction.

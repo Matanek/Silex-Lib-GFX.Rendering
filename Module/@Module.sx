@@ -1,6 +1,7 @@
 public use GFX.Rendering.Antialiasing.Antialiasing
 public use GFX.Rendering.Renderer.Renderer
 public use GFX.Rendering.Stats.Stats
+public use GFX.GPU.PresentMode
 
 contribute GFX.Plugins {
     public use GFX.Rendering.Plugin as Rendering
