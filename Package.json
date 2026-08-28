@@ -1,9 +1,12 @@
 {
   "name": "GFX.Rendering",
   "version": "0.3.0",
-  "description": "Generic rendering host with frame planning, multisampling, statistics, and presentation.",
+  "description": {
+    "en": "Generic rendering host with frame planning, multisampling, statistics, and presentation.",
+    "fr": "Hôte de rendu générique avec planification des frames, multisampling, statistiques et présentation."
+  },
   "authors": ["Matanek"],
-  "requires": { "silex": ">=0.39.0" },
+  "requires": { "silex": ">=0.42.0" },
   "dependencies": {
     "GFX": "^0.37.0",
     "GFX.GPU": "^0.1.0"
