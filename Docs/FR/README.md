@@ -76,6 +76,27 @@ les renderers Scene2D et Scene3D le configurent automatiquement.
 MSAA lisse la couverture géométrique de la frame. Il ne filtre pas l’atlas
 d’ombres séparé de Scene3D.
 
+## Rendre sans présenter
+
+Une application de test, de génération ou de mesure peut exécuter les mêmes
+passes vers une texture de frame privée sans acquérir ni présenter une image
+de swapchain :
+
+```sx
+application.add_plugin(Plugins.Rendering(
+    Plugins.Rendering.Settings(
+        antialiasing:Plugins.RenderingAntialiasing.none,
+        present_mode:Rendering.PresentMode.immediate,
+        presentation:false,
+    )
+))
+```
+
+La fenêtre plateforme peut alors rester cachée. Sa taille physique fixe celle
+de la cible hors écran, tandis que les plugins Scene2D et Scene3D conservent
+leurs chemins ordinaires. `presentation_enabled()` permet à une campagne de
+consigner le mode effectivement sélectionné.
+
 ## Lire les statistiques de frame
 
 `Rendering.Stats` rapporte le travail GPU soumis pour la frame terminée. Les
@@ -86,4 +107,4 @@ préfixées par `shadow_`, ce qui rend visible le coût des cascades d’ombres.
 Le package contribue `Plugins.Rendering`, `Plugins.Rendering.Settings`,
 `Plugins.RenderingAntialiasing` et `Resources.Renderer` aux catalogues ouverts
 de GFX. La présentation reste synchronisée par défaut ; une mesure peut demander
-explicitement `Rendering.PresentMode.immediate`.
+explicitement `Rendering.PresentMode.immediate` ou la désactiver.

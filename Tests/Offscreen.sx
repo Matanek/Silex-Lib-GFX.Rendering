@@ -1,0 +1,35 @@
+use GFX.Application
+use GFX.Color
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+
+func stop_after_offscreen_frame(
+    renderer:&Rendering.Renderer,
+    controller:&Application.Controller
+) {
+    assert(!renderer.presentation_enabled())
+    assert(renderer.stats().frames() == 1)
+    assert(renderer.stats().render_passes() == 1)
+    controller.stop()
+}
+
+test "execute the frame graph without swapchain presentation" {
+    var application = Application()
+    application.add_plugin(WindowPlugin(WindowPlugin.Settings()
+        ..title = "GFX.Rendering offscreen test"
+        ..width = 64
+        ..height = 64
+        ..hidden = true
+    ))
+    application.add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(
+        clear:Color.black(),
+        antialiasing:Rendering.Antialiasing.none,
+        present_mode:Rendering.PresentMode.immediate,
+        presentation:false
+    )))
+    application.add_after_system(
+        Application.Schedule.render,
+        stop_after_offscreen_frame
+    )
+    assert(application.run() == 0)
+}

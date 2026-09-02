@@ -11,6 +11,7 @@ test "consume Rendering directly and through the GFX catalogs" {
     graph.depends(second, first)
 
     var direct = Rendering.Renderer()
+    var offscreen = Rendering.Renderer(presentation:false)
     let plugin = Plugins.Rendering(Plugins.Rendering.Settings(
         antialiasing:Plugins.RenderingAntialiasing.none,
         present_mode:Rendering.PresentMode.immediate
@@ -20,6 +21,8 @@ test "consume Rendering directly and through the GFX catalogs" {
     assert(graph.compile())
     assert(graph.pass_name(graph.plan_pass(0)) == "First")
     assert(direct.sample_count() == GPU.Samples.one)
+    assert(direct.presentation_enabled())
+    assert(!offscreen.presentation_enabled())
     assert(plugin.id() == "GFX.Rendering.Plugin")
     assert(resource.stats().frames() == 0)
 }

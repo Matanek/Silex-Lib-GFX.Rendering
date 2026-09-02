@@ -12,6 +12,7 @@ struct RegisteredPass {
 
 public class Renderer {
     private let clear:Color
+    private let presentation:bool
     private var frame_graph:FrameGraph
     private let output:FrameGraph.Texture
     private var depth:FrameGraph.Texture? = null
@@ -25,7 +26,10 @@ public class Renderer {
     private var depth_width:int
     private var depth_height:int
 
-    init(clear:Color = Color(r:0.055, g:0.075, b:0.105, a:1.0)) {
+    init(
+        clear:Color = Color(r:0.055, g:0.075, b:0.105, a:1.0),
+        presentation:bool = true
+    ) {
         var graph = FrameGraph()
         self.output = graph.import_texture(
             "GFX.Output",
@@ -35,6 +39,7 @@ public class Renderer {
             )
         )
         self.clear = clear
+        self.presentation = presentation
         self.frame_graph = graph
         self.passes = []
         self.current_stats = Stats()
@@ -49,6 +54,7 @@ public class Renderer {
     func depth_texture() FrameGraph.Texture? { return self.depth }
     func stats() Stats { return self.current_stats }
     func sample_count() GPU.Samples { return self.samples }
+    func presentation_enabled() bool { return self.presentation }
 
     package func requires_depth() bool { return self.needs_depth }
     package func set_samples(value:GPU.Samples) { self.samples = value }
@@ -106,7 +112,20 @@ public class Renderer {
             }
         }
         var commands = device.commands()
-        if self.samples == GPU.Samples.one {
+        if !self.presentation {
+            if let color = self.physical_color {
+                var targets:GPU.ColorTarget[] = []
+                targets.append(GPU.ColorTarget(
+                    texture:color,
+                    clear:self.clear,
+                    load:GPU.Load.clear,
+                    store:GPU.Store.preserve
+                ))
+                var pass = commands.render(targets, depth_target)
+                self.execute(pass, graph, application)
+                pass.finish()
+            }
+        } elif self.samples == GPU.Samples.one {
             if var pass = commands.render(surface, self.clear, depth_target) {
                 self.execute(pass, graph, application)
                 pass.finish()
@@ -148,7 +167,7 @@ public class Renderer {
         width:int,
         height:int
     ) {
-        if self.samples == GPU.Samples.one {
+        if self.presentation && self.samples == GPU.Samples.one {
             self.physical_color = null
             self.color_format = format
             return
@@ -176,7 +195,7 @@ public class Renderer {
             height:resolved_height,
             usage:GPU.TextureUsage.as_color_target(),
             samples:self.samples,
-            name:"GFX multisampled frame color",
+            name:frame_color_name(self.presentation),
             optimized_clear:self.clear
         ))
         self.color_format = format
@@ -211,4 +230,9 @@ public class Renderer {
         for pass in self.passes { if pass.name == name { return pass } }
         panic("GFX.Rendering has no executor for FrameGraph pass '" + name + "'")
     }
+}
+
+func frame_color_name(presentation:bool) str {
+    if presentation { return "GFX multisampled frame color" }
+    return "GFX offscreen frame color"
 }

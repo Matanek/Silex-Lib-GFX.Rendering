@@ -74,6 +74,26 @@ configure it automatically.
 MSAA smooths frame-target geometry coverage. It does not filter Scene3D's
 separate shadow atlas.
 
+## Render without presenting
+
+A test, generation, or measurement application can execute the same passes
+into a private frame texture without acquiring or presenting a swapchain
+image:
+
+```sx
+application.add_plugin(Plugins.Rendering(
+    Plugins.Rendering.Settings(
+        antialiasing:Plugins.RenderingAntialiasing.none,
+        present_mode:Rendering.PresentMode.immediate,
+        presentation:false,
+    )
+))
+```
+
+The platform window can then remain hidden. Its physical size fixes the
+offscreen target dimensions while Scene2D and Scene3D keep their ordinary
+paths. `presentation_enabled()` lets a campaign record the selected mode.
+
 ## Read frame statistics
 
 `Rendering.Stats` reports GPU work submitted for the completed frame. The
@@ -84,4 +104,4 @@ prefixed with `color_` separate main rendering from those prefixed with
 The package contributes `Plugins.Rendering`, `Plugins.Rendering.Settings`,
 `Plugins.RenderingAntialiasing`, and `Resources.Renderer` to GFX's open
 catalogs. Presentation remains synchronized by default; a measurement can
-request `Rendering.PresentMode.immediate` explicitly.
+request `Rendering.PresentMode.immediate` explicitly or disable presentation.

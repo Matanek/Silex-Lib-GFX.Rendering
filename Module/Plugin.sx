@@ -12,16 +12,19 @@ public struct Plugin:PluginProtocol {
         var clear:GFX.Color
         var antialiasing:Antialiasing
         var present_mode:GPU.PresentMode?
+        var presentation:bool
 
         init(
             clear:GFX.Color = GFX.Color(r:0.055, g:0.075, b:0.105, a:1.0),
             antialiasing:Antialiasing? = null,
-            present_mode:GPU.PresentMode? = null
+            present_mode:GPU.PresentMode? = null,
+            presentation:bool = true
         ) {
             self.clear = clear
             self.antialiasing = Antialiasing.msaa_4x
             if let selected = antialiasing { self.antialiasing = selected }
             self.present_mode = present_mode
+            self.presentation = presentation
         }
     }
 
@@ -40,7 +43,10 @@ public struct Plugin:PluginProtocol {
         }
         application.add_plugin(GPUPlugin(gpu_settings))
         application.add_resource(Multisampling(self.settings.antialiasing))
-        application.add_resource(Renderer(self.settings.clear))
+        application.add_resource(Renderer(
+            self.settings.clear,
+            self.settings.presentation
+        ))
         application.add_system(Schedule.startup, resolve_multisampling)
         application.add_system(Schedule.render, begin_frame_stats)
         application.add_after_system(Schedule.render, render_frame)
