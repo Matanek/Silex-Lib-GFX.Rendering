@@ -4,8 +4,11 @@ use GFX.Rendering.Capture.Capture
 use GFX.Rendering.Capture.State
 use GFX.Rendering.Renderer
 use GFX.Rendering.Plugin as RenderingPlugin
+use GFX.Window
 use STD.FileSystem
 use STD.Path
+
+package struct SequenceProgress { var completed:int = 0 }
 
 // Offline export owns this Application's run interval. Each complete PNG is
 // committed before the next simulation sample; no collection of frames grows.
@@ -27,36 +30,59 @@ public func export_png(
     }
     application.require_plugin(RenderingPlugin())
     var session = Session(application)
+    var progress = SequenceProgress()
+    let result = (try render_sequence(application, session, directory, frames, frames_per_second, ready, progress))
+    session.close()
+    return result
+}
+
+// Both public exports use exactly the same controlled samples. The MP4 caller
+// retains the session while its encoder finishes and owns its private PNGs.
+package func render_sequence(
+    application:Application, session:Session, directory:str, frames:int,
+    frames_per_second:int, ready:(func(Application) bool)?, progress:&SequenceProgress,
+    width:int = 0, height:int = 0, label:str = "PNG"
+) Result<int, str> {
     if let prepared = ready {
         while session.is_running() && !prepared(application) { session.poll() }
     }
-    var completed = 0
     var failure:str? = null
     let interval = 1.0 / (frames_per_second as float)
-    while completed < frames && session.is_running() {
-        let path = frame_path(directory, completed)
+    while progress.completed < frames && session.is_running() {
+        try require_dimensions(application, width, height) else error { failure = error; break }
+        let path = frame_path(directory, progress.completed)
         var ticket = try request_frame(application, path) else error { failure = error; break }
         var delta = interval
-        if completed == 0 { delta = 0.0 }
+        if progress.completed == 0 { delta = 0.0 }
         try session.step(delta) else error { ticket.cancel(); failure = error; break }
         while ticket.state() == State.pending && session.is_running() {
             session.poll()
             if session.is_running() { progress_capture(application) }
         }
-        if !session.is_running() { ticket.cancel(); break }
-        if ticket.state() != State.completed {
+        if ticket.state() == State.completed {
+            progress.completed++
+            try require_dimensions(application, width, height) else error { failure = error; break }
+        } else {
+            if !session.is_running() { ticket.cancel(); break }
             if let error = ticket.error() { failure = error }
-            else { failure = "PNG export capture was cancelled" }
+            else { failure = label + " export capture was cancelled" }
             break
         }
-        completed++
     }
-    session.close()
-    if let error = failure { return Result<int, str>.failure("PNG export stopped after $(completed) frames: " + error) }
-    if completed != frames {
-        return Result<int, str>.failure("PNG export cancelled after $(completed) frames")
+    if let error = failure { return Result<int, str>.failure(label + " export stopped after $(progress.completed) frames: " + error) }
+    if progress.completed != frames {
+        return Result<int, str>.failure(label + " export cancelled after $(progress.completed) frames")
     }
-    return Result<int, str>.success(completed)
+    return Result<int, str>.success(progress.completed)
+}
+
+func require_dimensions(application:Application, width:int, height:int) Result<void, str> {
+    if width == 0 { return Result<void, str>.success() }
+    let size = application.resources().get<Window>().pixel_size()
+    if size.x as int != width || size.y as int != height {
+        return Result<void, str>.failure("MP4 export dimensions changed during capture")
+    }
+    return Result<void, str>.success()
 }
 
 func request_frame(application:Application, path:str) Result<Capture, str> {
@@ -71,7 +97,7 @@ func progress_capture(application:Application) {
     renderer.progress_captures()
 }
 
-func frame_path(directory:str, index:int) str {
+package func frame_path(directory:str, index:int) str {
     var number = "$(index)"
     while number.count() < 6 { number = "0" + number }
     return directory + "/frame-" + number + ".png"

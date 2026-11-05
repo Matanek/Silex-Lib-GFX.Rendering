@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `export_mp4` produit une vidéo sans son à temps contrôlé avec un FFmpeg explicitement choisi : MP4/MPEG-4 Part 2/YUV420P, séquence PNG temporaire, sortie exclusive, annulation et nettoyage.
+
 - `export_png` produit une séquence indexée à temps contrôlé, attend la préparation avant t=0 et conserve les PNG terminés en cas d’arrêt ou d’erreur.
 
 - `Renderer.capture_png` enregistre le prochain rendu complet, résolu après MSAA,

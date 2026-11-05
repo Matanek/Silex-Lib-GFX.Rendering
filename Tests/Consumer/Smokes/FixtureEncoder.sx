@@ -1,0 +1,24 @@
+use STD.Process
+use STD.File
+use STD.Text
+
+// Deliberately small executable substitute for lifecycle tests, never a codec.
+func main() {
+    let path = Process.executable_path()
+    let arguments = Process.arguments()
+    let probing = arguments.count() == 2 && arguments[1] == "-version"
+    if probing && !Text.ends_with(path, "probe-hang") {
+        if Text.ends_with(path, "wrong-banner") { print("different program") }
+        else { print("ffmpeg version lifecycle-fixture") }
+        return
+    }
+    if Text.ends_with(path, "hang") {
+        File.write_all(path + ".pid", "$(Process.id())\n")
+        while true {}
+    }
+    if Text.ends_with(path, "empty") { File.write_all("movie.mp4", ""); return }
+    if Text.ends_with(path, "flood") {
+        for index in 0...2000 { print("fixture encoder deliberately floods this diagnostic stream") }
+    }
+    panic("fixture encode failure")
+}

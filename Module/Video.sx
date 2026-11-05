@@ -1,0 +1,81 @@
+use GFX.Application
+use GFX.Application.Session
+use GFX.Rendering.Export
+use GFX.Rendering.Plugin as RenderingPlugin
+use GFX.Rendering.VideoEncoder
+use GFX.Rendering.VideoFiles
+use GFX.Window
+use STD.Path
+
+// The first offline video path stages the already-qualified PNG sequence.
+// Its disk use scales with the sequence; memory never accumulates its frames.
+public func export_mp4(
+    application:Application, path:str, frames:int, ffmpeg:str,
+    frames_per_second:int = 60, ready:(func(Application) bool)? = null
+) Result<int, str> {
+    if frames <= 0 || frames_per_second <= 0 {
+        return Result<int, str>.failure("MP4 export requires a positive frame count and frame rate")
+    }
+    if frames_per_second > 65_535 {
+        return Result<int, str>.failure("MPEG-4 supports integer frame rates up to 65535 Hz")
+    }
+    if path == "" { return Result<int, str>.failure("MP4 output path cannot be empty") }
+    try Path.validate(path) else error { return Result<int, str>.failure(error.detail) }
+    try VideoEncoder.probe(ffmpeg) else error { return Result<int, str>.failure(error) }
+    let directory = try VideoFiles.prepare(path) else error { return Result<int, str>.failure(error) }
+    application.require_plugin(RenderingPlugin())
+    var session = Session(application)
+    var progress = Export.SequenceProgress()
+    let produced = (try produce(application, session, directory, path, frames, frames_per_second, ffmpeg, ready, progress))
+    // Cancel/drain any PNG in flight before removing its private directory.
+    session.close()
+    let cleaned = (try VideoFiles.cleanup(directory, progress.completed))
+    match produced {
+        failure(error) => {
+            match cleaned {
+                failure(cleanup) => { return Result<int, str>.failure(error + "; " + cleanup) }
+                success => { return Result<int, str>.failure(error) }
+            }
+        }
+        success => {
+            match cleaned {
+                failure(error) => { return Result<int, str>.failure(error) }
+                success => { return Result<int, str>.success(progress.completed) }
+            }
+        }
+    }
+}
+
+func produce(
+    application:Application, session:Session, directory:str, path:str, frames:int,
+    rate:int, ffmpeg:str, ready:(func(Application) bool)?, progress:&Export.SequenceProgress
+) Result<void, str> {
+    var width = 0
+    var height = 0
+    {
+        let size = application.resources().get<Window>().pixel_size()
+        width = size.x as int
+        height = size.y as int
+    }
+    if width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0 {
+        return Result<void, str>.failure("MPEG-4 YUV420P requires positive even pixel dimensions")
+    }
+    let rendered = try Export.render_sequence(application, session, directory, frames, rate, ready, progress, width, height, "MP4") else error {
+        return Result<void, str>.failure(error)
+    }
+    if !session.is_running() { return Result<void, str>.failure("MP4 export cancelled before encoding") }
+    var encoder = try VideoEncoder.start(ffmpeg, directory, frames, rate) else error {
+        return Result<void, str>.failure(error)
+    }
+    while true {
+        session.poll()
+        if !session.is_running() {
+            encoder.cancel()
+            return Result<void, str>.failure("MP4 export cancelled during encoding")
+        }
+        let completed = try encoder.progress(10) else error { return Result<void, str>.failure(error) }
+        if completed { break }
+    }
+    try encoder.result() else error { return Result<void, str>.failure(error) }
+    return (try VideoFiles.publish(directory + "/movie.mp4", path, session))
+}

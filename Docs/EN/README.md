@@ -12,7 +12,7 @@ statistics, and presentation to the active window.
 silex install GFX.Rendering
 ```
 
-GFX.Rendering requires Silex 0.39.0 or newer.
+GFX.Rendering requires Silex 0.44.0 or newer.
 
 ## Register and order passes
 
@@ -101,6 +101,8 @@ To save a complete frame, see [Save a frame as PNG](Capture.md).
 ## Export an animation
 
 For a complete PNG sequence at a chosen frame rate, see [Export an animation](Export.md).
+
+To produce a silent file directly with an explicit encoder, see [Export an animation as MP4](Video.md).
 
 ## Read frame statistics
 

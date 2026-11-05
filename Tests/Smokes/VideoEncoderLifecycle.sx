@@ -1,0 +1,35 @@
+use GFX.Rendering.VideoEncoder
+use STD.Process
+use STD.File
+use STD.Text
+use STD.Time.Clock
+
+func main() {
+    let arguments = Process.arguments()
+    assert(arguments.count() == 3)
+    let path = arguments[1]
+    if arguments[2] == "--cancel" {
+        var encoder = VideoEncoder.start(path, Process.current_directory(), 1, 60)
+        var clock = Clock()
+        let first = clock.tick()
+        var started = false
+        while clock.get_total_seconds() < 2.0 {
+            assert(!encoder.progress(10))
+            match (try File.read_text(path + ".pid", 100)) {
+                success(text) => { if Text.ends_with(text, "\n") { started = true; break } }
+                failure(error) => {}
+            }
+        }
+        if !started { encoder.cancel(); panic("fixture encoder never started") }
+        encoder.cancel()
+        match (try encoder.result()) {
+            success => { panic("cancelled encoder succeeded") }
+            failure(error) => { assert(error == "FFmpeg did not complete") }
+        }
+    } else {
+        match (try VideoEncoder.probe(path, timeout_seconds:0.2)) {
+            success => { panic("invalid probe succeeded") }
+            failure(error) => { assert(error != ""); print(error) }
+        }
+    }
+}

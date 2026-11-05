@@ -1,0 +1,109 @@
+use STD.Path
+use STD.Subprocess
+use STD.Text.UTF8
+use STD.Time.Clock
+
+// Child owns and reaps its process, including cancellation. Only this object
+// holds it; dropping the optional child cancels even an unresponsive encoder.
+package class Encoder {
+    private var child:Subprocess.Child?
+    private var status:Subprocess.ExitStatus? = null
+    private var output:uint8[] = []
+    private var truncated:bool = false
+
+    init(child:Subprocess.Child) { self.child = child }
+
+    func progress(timeout:int = 0) Result<bool, str> {
+        if var child = self.child {
+            let event = try child.next_event(timeout) else error {
+                self.cancel()
+                return Result<bool, str>.failure("could not observe FFmpeg: " + error.detail)
+            }
+            if let value = event {
+                match value {
+                    output(stream, bytes) => {
+                        for byte in bytes {
+                            if self.output.count() < 16_384 { self.output.append(byte) }
+                            else { self.truncated = true }
+                        }
+                    }
+                    exited(status) => { self.status = status; self.child = null }
+                }
+            }
+        }
+        return Result<bool, str>.success(self.child == null)
+    }
+
+    func result() Result<void, str> {
+        if let status = self.status {
+            match status {
+                exited(code) => {
+                    if code == 0 { return Result<void, str>.success() }
+                    return Result<void, str>.failure("FFmpeg exited with code $(code): " + self.diagnostic())
+                }
+                signaled(signal) => { return Result<void, str>.failure("FFmpeg terminated by signal $(signal): " + self.diagnostic()) }
+            }
+        }
+        return Result<void, str>.failure("FFmpeg did not complete")
+    }
+
+    func diagnostic() str {
+        var text = "<non UTF-8 diagnostic>"
+        let view = @self.output[0:self.output.count()]
+        match (try UTF8.decode(view)) {
+            success(value) => { text = value }
+            failure(error) => {}
+        }
+        if self.truncated { text += " [diagnostic truncated]" }
+        return text
+    }
+
+    func identifies_ffmpeg() bool {
+        let prefix = UTF8.bytes("ffmpeg version ")
+        if self.output.count() < prefix.count() { return false }
+        for index in 0...prefix.count() { if self.output[index] != prefix[index] { return false } }
+        return true
+    }
+
+    func cancel() { self.child = null }
+    drop { self.cancel() }
+}
+
+package func probe(ffmpeg:str, timeout_seconds:float = 10.0) Result<void, str> {
+    let absolute = try Path.is_absolute(ffmpeg) else error { return Result<void, str>.failure(error.detail) }
+    if !absolute { return Result<void, str>.failure("FFmpeg requires an explicit absolute executable path") }
+    var encoder = try spawn(ffmpeg, ["-version"], null) else error { return Result<void, str>.failure(error) }
+    var clock = Clock()
+    let initial = clock.tick()
+    while true {
+        let completed = try encoder.progress(10) else error { return Result<void, str>.failure(error) }
+        if completed { break }
+        if clock.get_total_seconds() >= timeout_seconds {
+            encoder.cancel()
+            return Result<void, str>.failure("FFmpeg version probe timed out")
+        }
+    }
+    try encoder.result() else error { return Result<void, str>.failure(error) }
+    if !encoder.identifies_ffmpeg() { return Result<void, str>.failure("encoder did not identify itself as FFmpeg") }
+    return Result<void, str>.success()
+}
+
+package func start(ffmpeg:str, directory:str, frames:int, rate:int) Result<Encoder, str> {
+    // A fixed relative pattern avoids interpreting '%' in a user's directory.
+    return (try spawn(ffmpeg, [
+        "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-framerate", "$(rate)", "-start_number", "0", "-i", "frame-%06d.png",
+        "-frames:v", "$(frames)", "-an", "-c:v", "mpeg4", "-q:v", "2", "-bf", "0",
+        "-pix_fmt", "yuv420p", "-threads", "1", "-filter_threads", "1",
+        "-movflags", "+faststart", "-f", "mp4", "-n", "movie.mp4"
+    ], directory))
+}
+
+func spawn(ffmpeg:str, arguments:str[], directory:str?) Result<Encoder, str> {
+    var child = try Subprocess.spawn(Subprocess.SpawnCommand(
+        executable:ffmpeg, arguments:arguments, current_directory:directory,
+        inherit_environment:false, environment:[]
+    )) else error { return Result<Encoder, str>.failure("could not start FFmpeg: " + error.detail) }
+    try child.close_standard_input() else error { return Result<Encoder, str>.failure(error.detail) }
+    return Result<Encoder, str>.success(Encoder(child))
+}

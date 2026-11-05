@@ -1,0 +1,32 @@
+use GFX.Application
+use GFX.Rendering
+
+test "reject invalid MP4 counts before opening the application" {
+    for count in [0, -1] {
+        match (try Rendering.export_mp4(Application(1), ".silex/invalid.mp4", count, "/missing/ffmpeg")) {
+            success(value) => { panic("invalid frame count must fail") }
+            failure(error) => { assert(error == "MP4 export requires a positive frame count and frame rate") }
+        }
+    }
+}
+
+test "require an explicit absolute FFmpeg path" {
+    match (try Rendering.export_mp4(Application(1), ".silex/invalid.mp4", 1, "ffmpeg")) {
+        success(value) => { panic("a hidden PATH dependency must fail") }
+        failure(error) => { assert(error == "FFmpeg requires an explicit absolute executable path") }
+    }
+}
+
+test "reject frame rates beyond the MPEG-4 time base" {
+    match (try Rendering.export_mp4(Application(1), ".silex/invalid.mp4", 1, "/missing/ffmpeg", frames_per_second:65_536)) {
+        success(value) => { panic("an unsupported time base must fail") }
+        failure(error) => { assert(error == "MPEG-4 supports integer frame rates up to 65535 Hz") }
+    }
+}
+
+test "report unavailable FFmpeg without opening the application" {
+    match (try Rendering.export_mp4(Application(1), ".silex/invalid.mp4", 1, "/silex-nonexistent-encoder/ffmpeg")) {
+        success(value) => { panic("a missing encoder must fail") }
+        failure(error) => { assert(error != "") }
+    }
+}

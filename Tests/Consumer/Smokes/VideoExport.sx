@@ -1,0 +1,120 @@
+use GFX.Animation
+use GFX.Application
+use GFX.ECS
+use GFX.GPU
+use GFX.Rendering
+use GFX.Scene2D.Transform
+use GFX.Window.Plugin as WindowPlugin
+use STD.File
+use STD.FileSystem
+use STD.Math
+use STD.Process
+
+class Fixture {
+    var entity:ECS.Entity? = null
+    var pipeline:GPU.GraphicsPipeline? = null
+    var samples:int = 0
+    let rate:int
+    let output:str
+    let stop_after:int = 0
+    let conflict:bool = false
+    let resize:bool = false
+    let cancel_ready:bool = false
+}
+
+func configure(world:&ECS.World, fixture:&Fixture, device:@GPU.Device, surface:@GPU.Surface, renderer:&Rendering.Renderer) {
+    fixture.entity = world.spawn(ECS.EntityRecipe()
+        ..with(Transform())
+        ..with(Animation.move_to(Math.Vec2(240.0, 0.0), 1.0).play()))
+    fixture.pipeline = device.graphics_pipeline(
+        GPU.ShaderProgram.hlsl(file:"../Tests/Shaders/Capture.hlsl", fragment:"overlay_main"),
+        GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+    renderer.add_pass("Video.Marker", draw)
+}
+
+func observe(fixture:&Fixture, simulation:@Application.Simulation, world:@ECS.World, controller:&Application.Controller, window:&GFX.Window) {
+    let expected = (fixture.samples as float) / (fixture.rate as float)
+    assert(Math.abs(simulation.elapsed() - expected) < 0.0001)
+    if let entity = fixture.entity {
+        let x = world.get<Transform>(entity).position.x
+        assert(Math.abs(x - Math.min(expected * 240.0, 240.0)) < 0.001)
+    }
+    fixture.samples++
+    if fixture.resize && fixture.samples == 3 { window.resize(Math.Vec2(322.0, 96.0)) }
+    if fixture.stop_after > 0 && fixture.samples == fixture.stop_after { controller.stop() }
+}
+
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    let world = resources.get<ECS.World>()
+    if let entity = fixture.entity {
+        let x = 8 + (Math.floor(world.get<Transform>(entity).position.x + 0.5) as int)
+        if let pipeline = fixture.pipeline {
+            pass.scissor(x, 32, 16, 16)
+            pass.bind(pipeline)
+            pass.draw(3)
+        }
+    }
+}
+
+func prepared(application:Application) bool {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if fixture.cancel_ready { application.stop(); return false }
+    if fixture.conflict { File.write_all(fixture.output, "external output") }
+    return true
+}
+
+func main() {
+    let arguments = Process.arguments()
+    assert(arguments.count() >= 3, "usage: video-consumer <absolute-ffmpeg> <new-output> [--short|--rate30|--stop|--conflict|--odd]")
+    var frames = 60
+    var rate = 60
+    var stop_after = 0
+    var conflict = false
+    var width = 320
+    var encoder_error = false
+    var cancel_ready = false
+    var resize = false
+    for argument in arguments {
+        if argument == "--short" { frames = 1 }
+        if argument == "--rate30" { rate = 30 }
+        if argument == "--stop" { stop_after = 3 }
+        if argument == "--conflict" { conflict = true }
+        if argument == "--encoder-error" { encoder_error = true }
+        if argument == "--cancel-ready" { cancel_ready = true }
+        if argument == "--resize" { resize = true }
+        if argument == "--odd" { width = 319 }
+    }
+    var fixture = Fixture(rate:rate, output:arguments[2], stop_after:stop_after, conflict:conflict, resize:resize, cancel_ready:cancel_ready)
+    var application = Application(1)
+        ..add_resource(fixture)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = width..height = 96..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(clear:GFX.Color.black(), antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_plugin(Animation.Plugin())
+        ..add_system(Application.Schedule.startup, configure)
+        ..add_system(Application.Schedule.update, observe)
+    let result = (try Rendering.export_mp4(application, arguments[2], frames, ffmpeg:arguments[1], frames_per_second:rate, ready:prepared))
+    if stop_after > 0 || conflict || width % 2 != 0 || encoder_error || cancel_ready || resize {
+        match result {
+            success(count) => { panic("video failure fixture unexpectedly succeeded") }
+            failure(error) => { assert(error != ""); print(error) }
+        }
+        if conflict { assert(File.read_text(arguments[2], 100) == "external output") }
+        else {
+            match (try FileSystem.symbolic_link_metadata(arguments[2])) {
+                success(metadata) => { panic("failed export published a file") }
+                failure(error) => {}
+            }
+        }
+    } else {
+        match result {
+            success(count) => { assert(count == frames) }
+            failure(error) => { panic(error) }
+        }
+        assert(fixture.samples == frames)
+        assert(FileSystem.metadata(arguments[2]).size > 0)
+        print("MP4 export: $(frames) samples verified at $(rate) Hz")
+    }
+}

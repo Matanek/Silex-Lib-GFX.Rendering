@@ -13,7 +13,7 @@ active.
 silex install GFX.Rendering
 ```
 
-GFX.Rendering demande Silex 0.39.0 ou une version plus récente.
+GFX.Rendering demande Silex 0.44.0 ou une version plus récente.
 
 ## Enregistrer et ordonner des passes
 
@@ -105,6 +105,8 @@ Pour conserver une frame complète, suivre le guide
 ## Exporter une animation
 
 Pour produire une séquence PNG complète à cadence choisie, lire [Exporter une animation](Export.md).
+
+Pour produire directement un fichier sans son avec un encodeur explicite, lire [Exporter une animation en MP4](Video.md).
 
 ## Lire les statistiques de frame
 

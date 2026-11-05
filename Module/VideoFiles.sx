@@ -1,0 +1,125 @@
+use GFX.Application.Session
+use GFX.Rendering.Export
+use STD.File
+use STD.FileSystem
+use STD.Process
+use STD.Error
+use STD.IO
+use STD.Threading
+
+package func prepare(path:str) Result<str, str> {
+    match (try FileSystem.symbolic_link_metadata(path)) {
+        success(existing) => { return Result<str, str>.failure("MP4 destination already exists: " + path) }
+        failure(error) => {}
+    }
+    let process = Process.id()
+    var failure = "could not create MP4 temporary directory"
+    for attempt in 0...64 {
+        let directory = path + ".gfx-$(process)-$(attempt)"
+        match (try FileSystem.create_directory(directory)) {
+            success => {
+                match (try FileSystem.canonicalize(directory)) {
+                    success(absolute) => { return Result<str, str>.success(absolute) }
+                    failure(error) => {
+                        match (try FileSystem.remove_directory(directory)) {
+                            failure(cleanup) => {
+                                return Result<str, str>.failure(error.detail + "; could not clean MP4 workspace '" + directory + "': " + cleanup.detail)
+                            }
+                            success => { return Result<str, str>.failure(error.detail) }
+                        }
+                    }
+                }
+            }
+            failure(error) => { failure = error.detail }
+        }
+    }
+    return Result<str, str>.failure(failure)
+}
+
+package func cleanup(directory:str, completed:int) Result<void, str> {
+    var failure:str? = null
+    for index in 0...completed {
+        failure = keep_failure((try FileSystem.remove_file(Export.frame_path(directory, index))), failure)
+    }
+    match (try FileSystem.symbolic_link_metadata(directory + "/movie.mp4")) {
+        success(existing) => {
+            failure = keep_failure((try FileSystem.remove_file(directory + "/movie.mp4")), failure)
+        }
+        failure(error) => {}
+    }
+    failure = keep_failure((try FileSystem.remove_directory(directory)), failure)
+    if let error = failure { return Result<void, str>.failure("could not clean MP4 workspace '" + directory + "': " + error) }
+    return Result<void, str>.success()
+}
+
+// Keep the exclusive destination handle throughout publication; never reopen
+// or replace a path that another writer may have created in the meantime.
+package func publish(source:str, destination:str, session:Session) Result<void, str> {
+    var executor = Threading.Executor(1)
+    var job = executor.submit(PublishMovie(source:source, destination:destination))
+    while !job.fence().is_complete() { session.poll() }
+    let completed = job.complete()
+    var failure = completed.error
+    if !session.is_running() && failure == null { failure = "MP4 export cancelled during publication" }
+    if let error = failure {
+        if completed.created {
+            match (try FileSystem.remove_file(destination)) {
+                failure(cleanup) => { return Result<void, str>.failure(error + "; could not remove partial MP4: " + cleanup.detail) }
+                success => {}
+            }
+        }
+        return Result<void, str>.failure(error)
+    }
+    return Result<void, str>.success()
+}
+
+struct PublishMovie:Threading.Job {
+    let source:str
+    let destination:str
+    var created:bool = false
+    var error:str? = null
+
+    func execute() {
+        try copy_movie(self.source, self.destination, self.created) else error {
+            self.error = error
+            return
+        }
+    }
+}
+
+func copy_movie(source:str, destination:str, created:&bool) Result<void, str> {
+    var input = try File.open(source, File.OpenOptions(
+        access:File.Access.read, creation:File.Creation.open_existing, append:false
+    )) else error { return Result<void, str>.failure("FFmpeg produced no readable movie: " + error.detail) }
+    let length = try input.length() else error { return (try fail_input(input, error.detail)) }
+    if length == 0 { return (try fail_input(input, "FFmpeg produced an empty movie")) }
+    var output = try File.open(destination, File.OpenOptions(
+        access:File.Access.write, creation:File.Creation.create_new, append:false
+    )) else error { return (try fail_input(input, "could not create exclusive MP4 destination: " + error.detail)) }
+    created = true
+    var failure:str? = null
+    match (try IO.copy<File, File>(input, output, length)) {
+        failure(error) => { failure = error.detail }
+        success(count) => { if count != length { failure = "short MP4 publication copy" } }
+    }
+    if failure == null { failure = keep_failure((try output.flush()), failure) }
+    failure = keep_failure((try File.close(output)), failure)
+    failure = keep_failure((try File.close(input)), failure)
+    if let error = failure { return Result<void, str>.failure(error) }
+    return Result<void, str>.success()
+}
+
+func fail_input(input:File, message:str) Result<void, str> {
+    try File.close(input) else error { return Result<void, str>.failure(message + "; source close failed: " + error.detail) }
+    return Result<void, str>.failure(message)
+}
+
+func keep_failure(operation:Result<void, Error>, current:str?) str? {
+    match operation {
+        failure(error) => {
+            if current != null { return current }
+            return error.detail
+        }
+        success => { return current }
+    }
+}
