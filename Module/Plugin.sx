@@ -73,8 +73,8 @@ func render_frame(application:Application) {
     var stored = resources.remove<Renderer>()
     if var renderer = stored {
         {
-            let device = resources.get<GPU.Device>()
             let surface = resources.get<GPU.Surface>()
+            let device = resources.get<GPU.Device>()
             renderer.render(device, surface, application)
         }
         resources.insert(renderer)
@@ -86,5 +86,6 @@ func render_frame(application:Application) {
 func stop_renderer(application:Application) {
     var resources = application.resources()
     var removed = resources.remove<Renderer>()
+    if var renderer = removed { renderer.close_captures() }
     assert(removed != null)
 }

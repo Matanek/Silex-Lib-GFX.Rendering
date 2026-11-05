@@ -94,6 +94,10 @@ The platform window can then remain hidden. Its physical size fixes the
 offscreen target dimensions while Scene2D and Scene3D keep their ordinary
 paths. `presentation_enabled()` lets a campaign record the selected mode.
 
+## Save a frame
+
+To save a complete frame, see [Save a frame as PNG](Capture.md).
+
 ## Read frame statistics
 
 `Rendering.Stats` reports GPU work submitted for the completed frame. The

@@ -1,0 +1,169 @@
+use GFX.GPU
+use Image
+use Image.PNG
+use STD.File
+use STD.FileSystem
+use STD.Threading
+
+public enum State { pending; completed; failed; cancelled }
+
+public nocopy class Capture {
+    private let output:str
+    private var current:State = State.pending
+    private var failure:str? = null
+    private var cancellation:bool = false
+
+    package init(path:str) { self.output = path }
+
+    func path() str { return self.output }
+    func state() State { return self.current }
+    func error() str? { return self.failure }
+    func cancel() {
+        if self.current == State.pending { self.cancellation = true }
+    }
+
+    package func cancellation_requested() bool { return self.cancellation }
+    package func finish() { self.current = State.completed }
+    package func fail(error:str) { self.failure = error; self.current = State.failed }
+    package func finish_cancel() { self.current = State.cancelled }
+}
+
+// The scheduler never joins this executor during a frame. Mapping, pixel
+// copying, PNG encoding and file writes all belong to its one dedicated worker.
+package class CaptureQueue {
+    private var executor:Threading.Executor
+    private var ticket:Capture? = null
+    private var transfer:GPU.Readback? = null
+    private var job:Threading.JobHandle<WritePNG>? = null
+
+    init() { self.executor = Threading.Executor(1) }
+
+    func request(path:str) Result<Capture, str> {
+        self.progress()
+        if self.ticket != null {
+            return Result<Capture, str>.failure("a PNG capture is already pending")
+        }
+        var ticket = Capture(path)
+        self.ticket = ticket
+        return Result<Capture, str>.success(ticket)
+    }
+
+    func needs_frame() bool {
+        return self.ticket != null && self.transfer == null && self.job == null
+    }
+
+    func fail(error:str) {
+        if var ticket = self.ticket { ticket.fail(error) }
+        self.ticket = null
+        self.transfer = null
+    }
+
+    func submit(device:@GPU.Device, texture:GPU.Texture, opaque:bool) {
+        if !self.needs_frame() { return }
+        match (try device.read_texture(texture)) {
+            failure(error) => { self.fail(error) }
+            success(transfer) => {
+                self.transfer = transfer
+                self.opaque = opaque
+            }
+        }
+    }
+
+    private var opaque:bool = false
+
+    func progress() {
+        if var ticket = self.ticket {
+            if var handle = self.job {
+                if !handle.fence().is_complete() { return }
+                let completed = handle.complete()
+                self.job = null
+                if let error = completed.error {
+                    ticket.fail(error)
+                } elif ticket.cancellation_requested() {
+                    match (try FileSystem.remove_file(ticket.path())) {
+                        failure(error) => { ticket.fail("could not remove cancelled PNG: " + error.detail) }
+                        success => { ticket.finish_cancel() }
+                    }
+                } else { ticket.finish() }
+                self.ticket = null
+                return
+            }
+            if ticket.cancellation_requested() {
+                if var transfer = self.transfer { transfer.cancel() }
+                self.transfer = null
+                ticket.finish_cancel()
+                self.ticket = null
+                return
+            }
+            if var transfer = self.transfer {
+                if !transfer.is_ready() { return }
+                self.job = self.executor.submit(WritePNG(
+                    transfer:transfer, path:ticket.path(), opaque:self.opaque
+                ))
+                self.transfer = null
+            }
+        }
+    }
+
+    func close() {
+        if var ticket = self.ticket { ticket.cancel() }
+        // Accepted CPU work is finite and drained only on application shutdown.
+        self.executor.wait_idle()
+        self.progress()
+    }
+
+    drop { self.close() }
+}
+
+struct WritePNG:Threading.Job {
+    var transfer:GPU.Readback
+    let path:str
+    let opaque:bool
+    var error:str? = null
+
+    func execute() {
+        var pixels = try self.transfer.read() else error { self.error = error; return }
+        if self.opaque {
+            var index = 3
+            while index < pixels.count() { pixels[index] = 255 as uint8; index += 4 }
+        }
+        var image = Image.rgba8(self.transfer.width(), self.transfer.height(), pixels)
+        let bytes = try Image.encode(image, PNG.Options()) else error { self.error = error.detail; return }
+        try write_new_png(self.path, bytes) else error { self.error = error; return }
+    }
+}
+
+func write_new_png(path:str, bytes:uint8[]) Result<void, str> {
+    var file = try File.open(path, File.OpenOptions(
+        access:File.Access.write, creation:File.Creation.create_new, append:false
+    )) else error {
+        return Result<void, str>.failure("could not create PNG '" + path +
+            "' (existing outputs are preserved): " + error.detail)
+    }
+    var failure:str? = null
+    match (try file.write(@bytes[0:bytes.count()])) {
+        failure(error) => { failure = error.detail }
+        success(count) => {
+            if count != bytes.count() { failure = "short PNG write" }
+            else {
+                match (try file.flush()) {
+                    failure(error) => { failure = error.detail }
+                    success => {}
+                }
+            }
+        }
+    }
+    match (try File.close(file)) {
+        failure(error) => { failure = error.detail }
+        success => {}
+    }
+    if let error = failure {
+        match (try FileSystem.remove_file(path)) {
+            failure(cleanup) => {
+                return Result<void, str>.failure(error + "; could not remove partial PNG: " + cleanup.detail)
+            }
+            success => { return Result<void, str>.failure(error) }
+        }
+    }
+    return Result<void, str>.success()
+}

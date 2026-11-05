@@ -1,0 +1,9 @@
+# Historique des changements
+
+## [Unreleased]
+
+- `Renderer.capture_png` enregistre le prochain rendu complet, résolu après MSAA,
+  avec ticket, annulation, erreurs récupérables et sortie exclusive. Mapping,
+  copie CPU, PNG et écriture utilisent un worker dédié ; aucune lecture GPU
+  n'est déclenchée sans capture. Hors écran, l'alpha est préservé ; en présentation,
+  la sortie est opaque. Limite : une opération et 64 Mio de transfert par renderer.

@@ -1,0 +1,13 @@
+use GFX.GPU
+use GFX.Rendering.Renderer.capture_error
+
+test "reject empty unsupported and excessive capture surfaces" {
+    assert(capture_error(GPU.TextureFormat.rgba8_unorm, 0, 10) != null)
+    assert(capture_error(GPU.TextureFormat.rgba8_unorm, 10, 0) != null)
+    assert(capture_error(GPU.TextureFormat.rgba8_unorm, -1, 10) != null)
+    assert(capture_error(GPU.TextureFormat.rgba16_float, 64, 64) != null)
+    assert(capture_error(GPU.TextureFormat.invalid, 64, 64) != null)
+    assert(capture_error(GPU.TextureFormat.rgba8_unorm, 8192, 8192) != null)
+    assert(capture_error(GPU.TextureFormat.rgba8_unorm, 4096, 4096) == null)
+    assert(capture_error(GPU.TextureFormat.bgra8_srgb, 1920, 1080) == null)
+}

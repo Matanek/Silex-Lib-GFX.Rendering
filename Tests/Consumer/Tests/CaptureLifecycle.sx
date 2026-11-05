@@ -1,0 +1,82 @@
+use GFX.Application
+use GFX.GPU
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use STD.FileSystem
+
+class Lifecycle {
+    var ticket:Rendering.Capture? = null
+    var frames:int = 0
+    let stop_frame:int
+    let cancel_frame:int
+    let path:str
+}
+
+func request(renderer:&Rendering.Renderer, lifecycle:&Lifecycle) {
+    lifecycle.ticket = renderer.capture_png(lifecycle.path)
+}
+
+func progress(
+    lifecycle:&Lifecycle,
+    device:@GPU.Device,
+    controller:&Application.Controller
+) {
+    lifecycle.frames++
+    assert(lifecycle.frames < 10000)
+    // Force GPU readiness only in this test, so frame 2 deterministically
+    // dispatches the CPU job before shutdown or cancellation is requested.
+    if lifecycle.frames == 1 { device.wait_until_idle() }
+    if var ticket = lifecycle.ticket {
+        if lifecycle.frames == lifecycle.cancel_frame { ticket.cancel() }
+        if ticket.state() == Rendering.Capture.State.cancelled { controller.stop() }
+    }
+    if lifecycle.frames == lifecycle.stop_frame { controller.stop() }
+}
+
+func verify_lifecycle(stop_frame:int, cancel_frame:int, path:str) {
+    let removed = (try FileSystem.remove_file(path))
+    var lifecycle = Lifecycle(stop_frame:stop_frame, cancel_frame:cancel_frame, path:path)
+    var application = Application()
+    application.add_resource(lifecycle)
+    application.add_plugin(WindowPlugin(WindowPlugin.Settings()
+        ..title = "Automatic PNG lifecycle test" ..width = 64 ..height = 40 ..hidden = true
+    ))
+    application.add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(
+        presentation:false, antialiasing:Rendering.Antialiasing.none
+    )))
+    application.add_system(Application.Schedule.startup, request)
+    application.add_after_system(Application.Schedule.render, progress)
+    assert(application.run() == 0)
+    if let ticket = lifecycle.ticket {
+        if let error = ticket.error() { panic(error) }
+        assert(ticket.state() == Rendering.Capture.State.cancelled)
+    } else { panic("capture ticket was lost") }
+    match (try FileSystem.metadata(path)) {
+        failure(error) => {}
+        success(metadata) => { panic("cancelled PNG must not remain on disk") }
+    }
+}
+
+test "cancel a capture while its GPU transfer remains uncollected" {
+    verify_lifecycle(0, 1, ".silex/capture-cancel-gpu.png")
+}
+
+test "cancel a capture after its CPU job was dispatched" {
+    verify_lifecycle(0, 2, ".silex/capture-cancel-cpu.png")
+}
+
+test "close an application with a GPU capture in flight" {
+    verify_lifecycle(1, 0, ".silex/capture-close-gpu.png")
+}
+
+test "close an application with a PNG job in flight" {
+    verify_lifecycle(2, 0, ".silex/capture-close-cpu.png")
+}
+
+test "reject invalid capture paths before rendering" {
+    var renderer = Rendering.Renderer()
+    match (try renderer.capture_png("")) {
+        failure(error) => {}
+        success(ticket) => { panic("empty PNG path must fail") }
+    }
+}

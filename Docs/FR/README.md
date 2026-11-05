@@ -97,6 +97,11 @@ de la cible hors écran, tandis que les plugins Scene2D et Scene3D conservent
 leurs chemins ordinaires. `presentation_enabled()` permet à une campagne de
 consigner le mode effectivement sélectionné.
 
+## Enregistrer une frame
+
+Pour conserver une frame complète, suivre le guide
+[Enregistrer une frame en PNG](Capture.md).
+
 ## Lire les statistiques de frame
 
 `Rendering.Stats` rapporte le travail GPU soumis pour la frame terminée. Les

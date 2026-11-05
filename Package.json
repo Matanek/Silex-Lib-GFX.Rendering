@@ -9,6 +9,8 @@
   "requires": { "silex": ">=0.44.0" },
   "dependencies": {
     "GFX": "^0.40.0",
-    "GFX.GPU": "^0.3.0"
+    "GFX.GPU": "^0.3.0",
+    "Image": "^0.2.0",
+    "STD": "^0.22.0"
   }
 }

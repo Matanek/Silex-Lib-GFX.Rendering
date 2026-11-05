@@ -3,7 +3,10 @@ use GFX.Color
 use GFX.Rendering.FrameGraph
 use GFX.GPU
 use GFX.Rendering.Stats
+use GFX.Rendering.Capture.Capture
+use GFX.Rendering.Capture.CaptureQueue
 use GFX.Window
+use STD.Path
 
 struct RegisteredPass {
     let name:str
@@ -25,6 +28,7 @@ public class Renderer {
     private var color_format:GPU.TextureFormat? = null
     private var depth_width:int
     private var depth_height:int
+    private var captures:CaptureQueue? = null
 
     init(
         clear:Color = Color(r:0.055, g:0.075, b:0.105, a:1.0),
@@ -55,6 +59,21 @@ public class Renderer {
     func stats() Stats { return self.current_stats }
     func sample_count() GPU.Samples { return self.samples }
     func presentation_enabled() bool { return self.presentation }
+
+    // Capture the next complete render. The queue and worker are created only
+    // when capture is requested; the ordinary render path does no readback.
+    func capture_png(path:str) Result<Capture, str> {
+        if path == "" { return Result<Capture, str>.failure("PNG output path cannot be empty") }
+        try Path.validate(path) else error { return Result<Capture, str>.failure(error.detail) }
+        if self.captures == null { self.captures = CaptureQueue() }
+        if var captures = self.captures { return (try captures.request(path)) }
+        return Result<Capture, str>.failure("could not create the capture queue")
+    }
+
+    module func close_captures() {
+        if var captures = self.captures { captures.close() }
+        self.captures = null
+    }
 
     package func requires_depth() bool { return self.needs_depth }
     package func set_samples(value:GPU.Samples) { self.samples = value }
@@ -93,12 +112,52 @@ public class Renderer {
         var depth_target:GPU.DepthTarget? = null
         var window = application.resources().get<Window>()
         let size = window.pixel_size()
-        self.ensure_color(
+        var capture_frame = false
+        if var captures = self.captures {
+            captures.progress()
+            capture_frame = captures.needs_frame()
+            if capture_frame {
+                let format = surface.format()
+                let width = size.x as int
+                let height = size.y as int
+                if let error = capture_error(format, width, height) {
+                    captures.fail(error)
+                    capture_frame = false
+                }
+            }
+        }
+        match (try self.ensure_color(
             device,
             surface.format(),
             size.x as int,
-            size.y as int
-        )
+            size.y as int,
+            capture_frame
+        )) {
+            failure(error) => {
+                if var captures = self.captures { captures.fail(error) }
+                capture_frame = false
+                self.ensure_color(device, surface.format(), size.x as int, size.y as int)
+            }
+            success => {}
+        }
+        var capture_output:GPU.Texture? = null
+        if capture_frame {
+            if self.samples == GPU.Samples.one {
+                capture_output = self.physical_color
+            } else {
+                match (try device.texture(GPU.TextureSettings(
+                    format:surface.format(), width:size.x as int, height:size.y as int,
+                    usage:GPU.TextureUsage(sampled:true, color_target:true),
+                    name:"GFX resolved capture"
+                ))) {
+                    failure(error) => {
+                        if var captures = self.captures { captures.fail(error) }
+                        capture_frame = false
+                    }
+                    success(texture) => { capture_output = texture }
+                }
+            }
+        }
         if self.needs_depth {
             self.ensure_depth(device, size.x as int, size.y as int)
             if let texture = self.physical_depth {
@@ -112,7 +171,36 @@ public class Renderer {
             }
         }
         var commands = device.commands()
-        if !self.presentation {
+        if capture_frame {
+            if let color = self.physical_color {
+                var target = GPU.ColorTarget(
+                    texture:color, clear:self.clear, load:GPU.Load.clear,
+                    store:GPU.Store.preserve, cycle:false
+                )
+                if self.samples != GPU.Samples.one {
+                    target.resolve = capture_output
+                    target.store = GPU.Store.resolve
+                }
+                var targets:GPU.ColorTarget[] = [target]
+                var pass = commands.render(targets, depth_target)
+                self.execute(pass, graph, application)
+                pass.finish()
+                if self.presentation {
+                    if let output = capture_output {
+                        match (try commands.present(output, surface)) {
+                            failure(error) => {
+                                if var captures = self.captures { captures.fail(error) }
+                            }
+                            success(available) => {
+                                if !available {
+                                    if var captures = self.captures { captures.fail("capture surface is unavailable") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } elif !self.presentation {
             if let color = self.physical_color {
                 var targets:GPU.ColorTarget[] = []
                 targets.append(GPU.ColorTarget(
@@ -143,7 +231,19 @@ public class Renderer {
                 }
             }
         }
-        commands.submit()
+        match (try commands.submit()) {
+            failure(error) => {
+                if capture_frame {
+                    if var captures = self.captures { captures.fail(error) }
+                    return
+                }
+                panic(error)
+            }
+            success => {}
+        }
+        if let output = capture_output {
+            if var captures = self.captures { captures.submit(device, output, self.presentation) }
+        }
         self.current_stats.record_frame(graph.plan_count(), device.command_stats())
     }
 
@@ -165,12 +265,13 @@ public class Renderer {
         device:@GPU.Device,
         format:GPU.TextureFormat,
         width:int,
-        height:int
-    ) {
-        if self.presentation && self.samples == GPU.Samples.one {
+        height:int,
+        capture:bool = false
+    ) Result<void, str> {
+        if self.presentation && self.samples == GPU.Samples.one && !capture {
             self.physical_color = null
             self.color_format = format
-            return
+            return Result<void, str>.success()
         }
         var resolved_width = width
         var resolved_height = height
@@ -186,19 +287,20 @@ public class Renderer {
                 texture.samples() == self.samples &&
                 format_matches
             {
-                return
+                return Result<void, str>.success()
             }
         }
-        self.physical_color = device.texture(GPU.TextureSettings(
+        self.physical_color = try device.texture(GPU.TextureSettings(
             format:format,
             width:resolved_width,
             height:resolved_height,
-            usage:GPU.TextureUsage.as_color_target(),
+            usage:GPU.TextureUsage(sampled:self.samples == GPU.Samples.one, color_target:true),
             samples:self.samples,
             name:frame_color_name(self.presentation),
             optimized_clear:self.clear
-        ))
+        )) else error { return Result<void, str>.failure(error) }
         self.color_format = format
+        return Result<void, str>.success()
     }
 
     private func ensure_depth(device:@GPU.Device, width:int, height:int) {
@@ -235,4 +337,16 @@ public class Renderer {
 func frame_color_name(presentation:bool) str {
     if presentation { return "GFX multisampled frame color" }
     return "GFX offscreen frame color"
+}
+
+package func capture_error(format:GPU.TextureFormat, width:int, height:int) str? {
+    if width < 1 || height < 1 { return "capture surface has no pixels" }
+    if format != GPU.TextureFormat.rgba8_unorm && format != GPU.TextureFormat.bgra8_unorm &&
+        format != GPU.TextureFormat.rgba8_srgb && format != GPU.TextureFormat.bgra8_srgb {
+        return "PNG capture requires an SDR RGBA8 or BGRA8 surface"
+    }
+    if width > 16 * 1024 * 1024 || ((width + 63) / 64) * 256 > (64 * 1024 * 1024) / height {
+        return "PNG capture exceeds the 64 MiB transfer limit"
+    }
+    return null
 }

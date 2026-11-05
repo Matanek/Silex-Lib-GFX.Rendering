@@ -1,0 +1,176 @@
+use GFX.Application
+use GFX.GPU
+use GFX.Rendering
+use GFX.Window
+use GFX.Window.Plugin as WindowPlugin
+use Image
+use STD.FileSystem
+use STD.Math
+
+class Fixture {
+    var ticket:Rendering.Capture? = null
+    var pipeline:GPU.GraphicsPipeline? = null
+    var overlay:GPU.GraphicsPipeline? = null
+    var prefix:str
+    var presentation:bool
+    let multisampled:bool
+    var phase:int = 0
+    var frames:int = 0
+    var pending_frames:int = 0
+    var width:int = 0
+    var height:int = 0
+}
+
+func configure(device:@GPU.Device, surface:@GPU.Surface, renderer:&Rendering.Renderer, fixture:&Fixture, window:@Window) {
+    if fixture.multisampled { assert(renderer.sample_count() != GPU.Samples.one) }
+    let scene = renderer.add_pass("Capture.Scene", draw)
+    let overlay_pass = renderer.add_pass("Capture.Overlay", overlay)
+    renderer.graph().depends(overlay_pass, scene)
+    var targets:GPU.ColorTargetFormat[] = [GPU.ColorTargetFormat(format:surface.format())]
+    let settings = GPU.GraphicsPipelineSettings(
+        color_targets:targets, multisample:GPU.MultisampleState(samples:renderer.sample_count())
+    )
+    fixture.pipeline = device.graphics_pipeline(GPU.ShaderProgram.hlsl(file:"Shaders/Capture.hlsl"), settings)
+    fixture.overlay = device.graphics_pipeline(GPU.ShaderProgram.hlsl(file:"Shaders/Capture.hlsl", fragment:"overlay_main"), settings)
+    fixture.width = window.pixel_size().x as int
+    fixture.height = window.pixel_size().y as int
+    fixture.ticket = renderer.capture_png(fixture.prefix + "-first.png")
+    match (try renderer.capture_png(fixture.prefix + "-duplicate.png")) {
+        failure(error) => {}
+        success(ticket) => { panic("capture queue must be bounded") }
+    }
+}
+
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var fixture = application.resources().get<Fixture>()
+    assert(pass.size().width == fixture.width as uint32)
+    assert(pass.size().height == fixture.height as uint32)
+    if let pipeline = fixture.pipeline { pass.bind(pipeline); pass.draw(3) }
+}
+
+func overlay(pass:@GPU.RenderPass, application:@Application) {
+    var fixture = application.resources().get<Fixture>()
+    if let pipeline = fixture.overlay {
+        pass.scissor(4, 4, 4, 4)
+        pass.bind(pipeline)
+        pass.draw(3)
+    }
+}
+
+func close_byte(actual:uint8, expected:int) {
+    let delta = actual as int - expected
+    assert(delta >= -1 && delta <= 1)
+}
+
+func verify_png(path:str, width:int, height:int, opaque:bool) {
+    var image = Image.load(path)
+    assert(image.width() == width)
+    assert(image.height() == height)
+    let top_left = image.pixel(1, 1)
+    let top_right = image.pixel(width - 2, 1)
+    let bottom_left = image.pixel(1, height - 2)
+    let bottom_right = image.pixel(width - 2, height - 2)
+    assert(top_left.r == 255 as uint8 && top_left.g == 0 as uint8 && top_left.b == 0 as uint8)
+    assert(top_right.r == 0 as uint8 && top_right.g == 255 as uint8 && top_right.b == 0 as uint8)
+    assert(bottom_left.r == 0 as uint8 && bottom_left.g == 0 as uint8 && bottom_left.b == 255 as uint8)
+    close_byte(bottom_right.r, 32)
+    close_byte(bottom_right.g, 64)
+    close_byte(bottom_right.b, 128)
+    if opaque {
+        assert(top_left.a == 255 as uint8 && top_right.a == 255 as uint8 && bottom_left.a == 255 as uint8)
+    } else {
+        close_byte(top_left.a, 128)
+        close_byte(top_right.a, 191)
+        close_byte(bottom_left.a, 64)
+    }
+    let overlay = image.pixel(5, 5)
+    assert(overlay.r == 255 as uint8 && overlay.g == 0 as uint8 && overlay.b == 255 as uint8)
+}
+
+func observe(
+    fixture:&Fixture,
+    renderer:&Rendering.Renderer,
+    window:&Window,
+    device:@GPU.Device,
+    controller:&Application.Controller
+) {
+    fixture.frames++
+    assert(fixture.frames < 10000)
+    if var ticket = fixture.ticket {
+        if ticket.state() == Rendering.Capture.State.pending {
+            fixture.pending_frames++
+            return
+        }
+        if fixture.phase == 0 {
+            if let error = ticket.error() { panic(error) }
+            assert(ticket.state() == Rendering.Capture.State.completed)
+            verify_png(ticket.path(), fixture.width, fixture.height, fixture.presentation)
+            window.resize(Math.Vec2(80.0, 48.0))
+            fixture.width = window.pixel_size().x as int
+            fixture.height = window.pixel_size().y as int
+            fixture.ticket = renderer.capture_png(fixture.prefix + "-second.png")
+        } elif fixture.phase == 1 {
+            if let error = ticket.error() { panic(error) }
+            assert(ticket.state() == Rendering.Capture.State.completed)
+            verify_png(ticket.path(), fixture.width, fixture.height, fixture.presentation)
+            fixture.ticket = renderer.capture_png(fixture.prefix + "-second.png")
+        } elif fixture.phase == 2 {
+            assert(ticket.state() == Rendering.Capture.State.failed)
+            verify_png(ticket.path(), fixture.width, fixture.height, fixture.presentation)
+            fixture.ticket = renderer.capture_png(".silex/missing-capture-parent/output.png")
+        } elif fixture.phase == 3 {
+            assert(ticket.state() == Rendering.Capture.State.failed)
+            var cancelled = renderer.capture_png(fixture.prefix + "-cancelled.png")
+            cancelled.cancel()
+            fixture.ticket = cancelled
+        } elif fixture.phase == 4 {
+            assert(ticket.state() == Rendering.Capture.State.cancelled)
+            fixture.ticket = null
+        }
+        fixture.phase++
+        return
+    }
+    assert(fixture.pending_frames >= 2)
+    assert(device.command_stats().downloads == 0)
+    controller.stop()
+}
+
+func verify_capture(presentation:bool, antialiasing:Rendering.Antialiasing, prefix:str) {
+    let removed_first = (try FileSystem.remove_file(prefix + "-first.png"))
+    let removed_second = (try FileSystem.remove_file(prefix + "-second.png"))
+    var application = Application()
+    application.add_plugin(WindowPlugin(WindowPlugin.Settings()
+        ..title = "Automatic GFX PNG capture test"
+        ..width = 64 ..height = 40 ..hidden = true
+    ))
+    application.add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(
+        presentation:presentation, antialiasing:antialiasing,
+        present_mode:GPU.PresentMode.immediate
+    )))
+    application.add_resource(Fixture(prefix:prefix, presentation:presentation,
+        multisampled:antialiasing != Rendering.Antialiasing.none))
+    application.add_system(Application.Schedule.startup, configure)
+    application.add_after_system(Application.Schedule.render, observe)
+    assert(application.run() == 0)
+}
+
+test "capture complete offscreen frames without MSAA" {
+    verify_capture(false, Rendering.Antialiasing.none, ".silex/capture-offscreen-one")
+}
+
+test "capture resolved offscreen frames with MSAA" {
+    verify_capture(false, Rendering.Antialiasing.msaa_4x, ".silex/capture-offscreen-msaa")
+}
+
+test "capture presented frames without MSAA" {
+    verify_capture(true, Rendering.Antialiasing.none, ".silex/capture-present-one")
+}
+
+test "capture presented frames with MSAA" {
+    verify_capture(true, Rendering.Antialiasing.msaa_4x, ".silex/capture-present-msaa")
+}
+
+func main() {
+    verify_capture(true, Rendering.Antialiasing.msaa_4x, ".silex/capture-present-msaa")
+    print("PNG capture: complete frame, MSAA, resize, exclusive output and errors passed")
+}
