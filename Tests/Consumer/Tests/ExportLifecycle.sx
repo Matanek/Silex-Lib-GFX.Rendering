@@ -1,0 +1,111 @@
+use GFX.Application
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use STD.File
+use STD.FileSystem
+
+class Policy {
+    let directory:str
+    let stop_after:int = 0
+    let sabotage:int = 0
+    var frames:int = 0
+}
+
+func observe(policy:&Policy, controller:&Application.Controller) {
+    policy.frames++
+    if policy.stop_after > 0 && policy.frames == policy.stop_after { controller.stop() }
+}
+
+func prepared(application:Application) bool {
+    var resources = application.resources()
+    let policy = resources.get<Policy>()
+    if policy.sabotage == 1 {
+        File.write_all(policy.directory + "/frame-000000.png", "existing output")
+    }
+    if policy.sabotage == 2 { FileSystem.remove_directory(policy.directory) }
+    if policy.sabotage == 3 { application.stop(); return false }
+    return true
+}
+
+func clean(directory:str) {
+    for index in 0...4 {
+        let removed = (try FileSystem.remove_file(directory + "/frame-00000$(index).png"))
+    }
+    let removed = (try FileSystem.remove_directory(directory))
+}
+
+func scene(policy:Policy) Application {
+    return Application(1)
+        ..add_resource(policy)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 16..height = 16..hidden = true))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(presentation:false)))
+        ..add_system(Application.Schedule.update, observe)
+}
+
+test "reject invalid sequence parameters and preserve an existing directory" {
+    let directory = ".silex/export-existing"
+    clean(directory)
+    FileSystem.create_directory(directory)
+    File.write_all(directory + "/frame-000000.png", "existing output")
+    for count in [0, -1, 4] {
+        match (try Rendering.export_png(Application(1), directory, count)) {
+            failure(error) => { assert(error != "") }
+            success(value) => { panic("an existing output directory must not be reused") }
+        }
+    }
+    match (try Rendering.export_png(Application(1), ".silex/export-invalid-rate", 4, 0)) {
+        failure(error) => {}
+        success(value) => { panic("zero frame rate must fail") }
+    }
+    assert(File.read_text(directory + "/frame-000000.png", 100) == "existing output")
+}
+
+test "stop before readiness without advancing or writing an image" {
+    let directory = ".silex/export-cancel-ready"
+    clean(directory)
+    var policy = Policy(directory:directory, sabotage:3)
+    match (try Rendering.export_png(scene(policy), directory, 4, ready:prepared)) {
+        failure(error) => { assert(error == "PNG export cancelled after 0 frames") }
+        success(value) => { panic("cancelled export must fail") }
+    }
+    assert(policy.frames == 0)
+    assert(FileSystem.list(directory).count() == 0)
+}
+
+test "cancel with a GPU capture in flight and retain only completed files" {
+    let directory = ".silex/export-cancel-flight"
+    clean(directory)
+    var policy = Policy(directory:directory, stop_after:3)
+    match (try Rendering.export_png(scene(policy), directory, 4)) {
+        failure(error) => { assert(error == "PNG export cancelled after 2 frames") }
+        success(value) => { panic("cancelled export must fail") }
+    }
+    assert(policy.frames == 3)
+    assert(FileSystem.list(directory).count() == 2)
+    let first = FileSystem.metadata(directory + "/frame-000000.png")
+    let second = FileSystem.metadata(directory + "/frame-000001.png")
+    assert(first.size > 0 && second.size > 0)
+}
+
+test "report exclusive output conflicts introduced after directory creation" {
+    let directory = ".silex/export-race"
+    clean(directory)
+    var policy = Policy(directory:directory, sabotage:1)
+    match (try Rendering.export_png(scene(policy), directory, 4, ready:prepared)) {
+        failure(error) => { assert(error != "") }
+        success(value) => { panic("exclusive PNG output must fail") }
+    }
+    assert(File.read_text(directory + "/frame-000000.png", 100) == "existing output")
+    assert(FileSystem.list(directory).count() == 1)
+}
+
+test "report write failures after output preparation and close the application" {
+    let directory = ".silex/export-write-failure"
+    clean(directory)
+    var policy = Policy(directory:directory, sabotage:2)
+    match (try Rendering.export_png(scene(policy), directory, 4, ready:prepared)) {
+        failure(error) => { assert(error != "") }
+        success(value) => { panic("PNG creation in a removed directory must fail") }
+    }
+    assert(policy.frames == 1)
+}

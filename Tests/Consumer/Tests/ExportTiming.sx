@@ -1,0 +1,145 @@
+use GFX.Animation
+use GFX.Application
+use GFX.Application.FrameTime
+use GFX.ECS
+use GFX.Physics
+use GFX.Plugins
+use GFX.Rendering
+use GFX.Scene2D
+use GFX.Window.Plugin as WindowPlugin
+use STD.FileSystem
+use STD.Math
+
+class Counts {
+    var updates:int = 0
+    var fixed_steps:int = 0
+    var elapsed:float = 0.0
+    var delta:float = 0.0
+}
+
+struct FixedProbe:Application.Plugin {
+    func id() str { return "Export.FixedProbe" }
+    func build(host:&Application) { Physics.Physics3DStep.before_step(host, fixed_step) }
+}
+
+func fixed_step(application:Application, delta:float) {
+    assert(Math.abs(delta - 1.0 / 60.0) < 0.000001)
+    var resources = application.resources()
+    var counts = resources.get_mut<Counts>()
+    counts.fixed_steps++
+}
+
+func observe(counts:&Counts, time:@FrameTime, simulation:@Application.Simulation) {
+    counts.updates++
+    counts.delta = time.delta
+    counts.elapsed = simulation.elapsed()
+}
+
+func clean(directory:str, count:int) {
+    for index in 0...count {
+        var number = "$(index)"
+        while number.count() < 6 { number = "0" + number }
+        let removed = (try FileSystem.remove_file(directory + "/frame-" + number + ".png"))
+    }
+    let removed = (try FileSystem.remove_directory(directory))
+}
+
+test "export shares its controlled clock with child application scopes" {
+    let directory = ".silex/export-scopes"
+    clean(directory, 4)
+    var root_counts = Counts()
+    var child_counts = Counts()
+    var application = Application(1)
+        ..add_resource(root_counts)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 16..height = 16..hidden = true))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(presentation:false)))
+        ..add_plugin(Animation.Plugin())
+        ..add_system(Application.Schedule.update, observe)
+    var bundle = Application.Bundle(application)
+        ..add_resource(child_counts)
+        ..add_system(Application.Schedule.update, observe)
+    application.add_plugin(Application.BundleManager(bundle))
+    assert(Rendering.export_png(application, directory, 4, 4) == 4)
+    assert(root_counts.updates == 4 && child_counts.updates == 4)
+    assert(root_counts.delta == 0.25 && child_counts.delta == 0.25)
+    assert(root_counts.elapsed == 0.75 && child_counts.elapsed == 0.75)
+}
+
+test "export drives real Physics3D fixed steps rather than wall clock waits" {
+    let directory = ".silex/export-fixed"
+    clean(directory, 60)
+    var counts = Counts()
+    var application = Application(1)
+        ..add_resource(counts)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 16..height = 16..hidden = true))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(presentation:false)))
+        ..add_plugin(Plugins.Physics3D(Plugins.Physics3D.Settings()
+            ..world = (Physics.World3DSettings()..gravity = Math.Vec3())
+            ..fixed_delta = 1.0 / 60.0))
+        ..add_plugin(FixedProbe())
+        ..add_system(Application.Schedule.update, observe)
+    assert(Rendering.export_png(application, directory, 60, 60) == 60)
+    assert(counts.updates == 60)
+    assert(counts.fixed_steps == 59)
+    assert(Math.abs(counts.elapsed - 59.0 / 60.0) < 0.00001)
+}
+
+test "offline export drains fixed physics steps beyond the realtime catch-up limit" {
+    let directory = ".silex/export-fixed-slow-rate"
+    clean(directory, 5)
+    var counts = Counts()
+    var application = Application(1)
+        ..add_resource(counts)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 16..height = 16..hidden = true))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(presentation:false)))
+        ..add_plugin(Plugins.Physics3D(Plugins.Physics3D.Settings()
+            ..world = (Physics.World3DSettings()..gravity = Math.Vec3())
+            ..fixed_delta = 1.0 / 60.0..maximum_catch_up_steps = 2))
+        ..add_plugin(FixedProbe())
+        ..add_system(Application.Schedule.update, observe)
+    assert(Rendering.export_png(application, directory, 5, 10) == 5)
+    assert(counts.fixed_steps == 24)
+}
+
+struct Fixed2DProbe:Application.Plugin {
+    func id() str { return "Export.Fixed2DProbe" }
+    func build(host:&Application) { Physics.Physics2DStep.before_step(host, fixed_step) }
+}
+
+test "offline export also drains Physics2D steps beyond its realtime limit" {
+    let directory = ".silex/export-fixed-2d"
+    clean(directory, 5)
+    var counts = Counts()
+    var application = Application(1)
+        ..add_resource(counts)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 16..height = 16..hidden = true))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(presentation:false)))
+        ..add_plugin(Plugins.Physics2D(Plugins.Physics2D.Settings()
+            ..world = (Physics.World2DSettings()..gravity = Math.Vec2())
+            ..fixed_delta = 1.0 / 60.0..maximum_catch_up_steps = 2))
+        ..add_plugin(Fixed2DProbe())
+        ..add_system(Application.Schedule.update, observe)
+    assert(Rendering.export_png(application, directory, 5, 10) == 5)
+    assert(counts.fixed_steps == 24)
+}
+
+test "realtime physics retains its configured catch-up bound" {
+    var counts = Counts()
+    var application = Application(1)
+        ..add_resource(counts)
+        ..add_plugin(Plugins.Physics3D(Plugins.Physics3D.Settings()
+            ..world = (Physics.World3DSettings()..gravity = Math.Vec3())
+            ..fixed_delta = 1.0 / 60.0..maximum_catch_up_steps = 2))
+        ..add_plugin(FixedProbe())
+    application.prepare()
+    {
+        var resources = application.resources()
+        var time = resources.get_mut<FrameTime>()
+        assert(!time.is_controlled())
+        time.delta = 0.1
+    }
+    application.run_schedule(Application.Schedule.update)
+    application.run_schedule(Application.Schedule.post_update)
+    assert(counts.fixed_steps == 2)
+    application.run_schedule(Application.Schedule.shutdown)
+}

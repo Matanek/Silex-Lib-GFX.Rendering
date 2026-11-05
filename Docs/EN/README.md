@@ -98,6 +98,10 @@ paths. `presentation_enabled()` lets a campaign record the selected mode.
 
 To save a complete frame, see [Save a frame as PNG](Capture.md).
 
+## Export an animation
+
+For a complete PNG sequence at a chosen frame rate, see [Export an animation](Export.md).
+
 ## Read frame statistics
 
 `Rendering.Stats` reports GPU work submitted for the completed frame. The

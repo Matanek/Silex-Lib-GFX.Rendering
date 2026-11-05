@@ -78,6 +78,11 @@ public class Renderer {
     package func requires_depth() bool { return self.needs_depth }
     package func set_samples(value:GPU.Samples) { self.samples = value }
 
+    // An offline exporter advances fences and encoding independently of drawing.
+    package func progress_captures() {
+        if var captures = self.captures { captures.progress() }
+    }
+
     func add_pass(
         name:str,
         execute:func(@GPU.RenderPass, @Application),

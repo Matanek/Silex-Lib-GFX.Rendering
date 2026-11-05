@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `export_png` produit une séquence indexée à temps contrôlé, attend la préparation avant t=0 et conserve les PNG terminés en cas d’arrêt ou d’erreur.
+
 - `Renderer.capture_png` enregistre le prochain rendu complet, résolu après MSAA,
   avec ticket, annulation, erreurs récupérables et sortie exclusive. Mapping,
   copie CPU, PNG et écriture utilisent un worker dédié ; aucune lecture GPU

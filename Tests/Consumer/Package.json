@@ -5,6 +5,11 @@
     "GFX.GPU": "^0.1.0",
     "GFX.Rendering": "^0.1.0",
     "Image": "^0.2.0",
-    "STD": "^0.22.0"
+    "STD": "^0.22.0",
+    "GFX.Animation": "^0.4.0",
+    "GFX.ECS": "^0.2.3",
+    "GFX.Scene2D": "^0.3.0",
+    "GFX.Application": "^0.1.0",
+    "GFX.Physics": "^0.7.0"
   }
 }

@@ -102,6 +102,10 @@ consigner le mode effectivement sélectionné.
 Pour conserver une frame complète, suivre le guide
 [Enregistrer une frame en PNG](Capture.md).
 
+## Exporter une animation
+
+Pour produire une séquence PNG complète à cadence choisie, lire [Exporter une animation](Export.md).
+
 ## Lire les statistiques de frame
 
 `Rendering.Stats` rapporte le travail GPU soumis pour la frame terminée. Les

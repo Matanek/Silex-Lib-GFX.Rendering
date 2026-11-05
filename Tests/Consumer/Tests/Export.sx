@@ -1,0 +1,144 @@
+use GFX.Animation
+use GFX.Application
+use GFX.Application.FrameTime
+use GFX.ECS
+use GFX.GPU
+use GFX.Rendering
+use GFX.Scene2D.Transform
+use GFX.Window.Plugin as WindowPlugin
+use Image
+use STD.FileSystem
+use STD.Math
+use STD.Time.Clock
+
+class Fixture {
+    var entity:ECS.Entity? = null
+    var pipeline:GPU.GraphicsPipeline? = null
+    var samples:float[] = []
+    var frames:int = 0
+    var ready_calls:int = 0
+    let paused:bool = false
+    var renders:int = 0
+    let slow:bool
+    let rate:int
+}
+
+func configure(world:&ECS.World, fixture:&Fixture, device:@GPU.Device, surface:@GPU.Surface, renderer:&Rendering.Renderer) {
+    fixture.entity = world.spawn(ECS.EntityRecipe()
+        ..with(Transform())
+        ..with(Animation.move_to(Math.Vec2(60.0, 0.0), 1.0).play()))
+    fixture.pipeline = device.graphics_pipeline(
+        GPU.ShaderProgram.hlsl(file:"Shaders/Capture.hlsl", fragment:"overlay_main"),
+        GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+    renderer.add_pass("Export.Marker", draw)
+}
+
+func observe(fixture:&Fixture, world:@ECS.World, time:@FrameTime, simulation:@Application.Simulation) {
+    let expected = (sample_index(fixture.frames, fixture.paused) as float) / (fixture.rate as float)
+    assert(Math.abs(simulation.elapsed() - expected) < 0.0001)
+    if fixture.frames == 0 { assert(time.delta == 0.0) }
+    else { assert(Math.abs(time.delta - 1.0 / (fixture.rate as float)) < 0.000001) }
+    if let entity = fixture.entity { fixture.samples.append(world.get<Transform>(entity).position.x) }
+    fixture.frames++
+}
+
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    let world = resources.get<ECS.World>()
+    if fixture.slow {
+        var clock = Clock()
+        let initial = clock.tick()
+        while clock.get_total_seconds() < 0.002 {}
+    }
+    if let entity = fixture.entity {
+        let position = world.get<Transform>(entity).position
+        let x = Math.clamp(Math.floor(position.x + 0.5), 0.0, 62.0) as int
+        if let pipeline = fixture.pipeline {
+            pass.scissor(x, 4, 2, 2)
+            pass.bind(pipeline)
+            pass.draw(3)
+        }
+    }
+}
+
+func sample_index(index:int, paused:bool) int {
+    if !paused || index < 20 { return index }
+    if index < 30 { return 19 }
+    return index - 10
+}
+
+func after_render(fixture:&Fixture, simulation:&Application.Simulation) {
+    fixture.renders++
+    assert(fixture.renders < 100_000)
+    if fixture.paused {
+        if fixture.frames == 20 { simulation.pause() }
+        if fixture.frames == 30 { simulation.resume() }
+    }
+}
+
+func ready(application:Application) bool {
+    var resources = application.resources()
+    {
+        let simulation = resources.get<Application.Simulation>()
+        assert(simulation.elapsed() == 0.0)
+    }
+    var fixture = resources.get_mut<Fixture>()
+    assert(fixture.frames == 0)
+    fixture.ready_calls++
+    return fixture.ready_calls >= 3
+}
+
+func path(directory:str, index:int) str {
+    var number = "$(index)"
+    while number.count() < 6 { number = "0" + number }
+    return directory + "/frame-" + number + ".png"
+}
+
+func clean(directory:str, count:int) {
+    for index in 0...count { let removed = (try FileSystem.remove_file(path(directory, index))) }
+    let removed = (try FileSystem.remove_directory(directory))
+}
+
+func export(directory:str, slow:bool, count:int = 60, rate:int = 60, paused:bool = false) {
+    clean(directory, count)
+    var fixture = Fixture(slow:slow, rate:rate, paused:paused)
+    var application = Application(1)
+        ..add_resource(fixture)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 64..height = 32..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(clear:GFX.Color.black(), antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_plugin(Animation.Plugin())
+        ..add_system(Application.Schedule.startup, configure)
+        ..add_system(Application.Schedule.update, observe, process_mode:Application.ProcessMode.always)
+        ..add_after_system(Application.Schedule.render, after_render, process_mode:Application.ProcessMode.always)
+    let result = Rendering.export_png(application, directory, count, rate, ready)
+    assert(result == count)
+    assert(fixture.frames == count && fixture.samples.count() == count)
+    assert(fixture.renders == count)
+    assert(fixture.ready_calls == 3)
+    let entries = FileSystem.list(directory)
+    assert(entries.count() == count)
+    for index in 0...count {
+        let expected = Math.min((sample_index(index, paused) as float) * 60.0 / (rate as float), 60.0)
+        assert(Math.abs(fixture.samples[index] - expected) < 0.001)
+        var image = Image.load(path(directory, index))
+        assert(image.width() == 64 && image.height() == 32)
+        let x = Math.clamp(Math.floor(expected + 0.5), 0.0, 62.0) as int
+        for y in 0...32 {
+            for column in 0...64 {
+                let pixel = image.pixel(column, y)
+                var expected_byte = 0
+                if column >= x && column < x + 2 && y >= 4 && y < 6 { expected_byte = 255 }
+                assert(pixel.r as int == expected_byte && pixel.g == 0 && pixel.b as int == expected_byte && pixel.a == 255)
+            }
+        }
+    }
+}
+
+test "export sixty exact animation samples including the initial pose" { export(".silex/export-basic", false) }
+test "slow processing preserves every indexed animation pose" { export(".silex/export-slow", true) }
+test "longer sequences preserve their chosen cadence" { export(".silex/export-long", false, 120, 30) }
+
+test "paused animation keeps exporting repeated poses without stopping the renderer" { export(".silex/export-pause", false, paused:true) }
+
+func main() { export(".silex/export-program", false); print("controlled PNG export: 60 frames verified") }

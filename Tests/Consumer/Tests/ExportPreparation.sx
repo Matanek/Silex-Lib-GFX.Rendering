@@ -1,0 +1,104 @@
+use GFX.Application
+use GFX.Application.FrameTime
+use GFX.GPU
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use Image
+use Image.PNG
+use STD.FileSystem
+use STD.Threading
+use STD.Time.Clock
+
+struct LoadAsset:Threading.Job {
+    let path:str
+    var image:Image? = null
+    var error:str? = null
+
+    func execute() {
+        var clock = Clock()
+        let initial = clock.tick()
+        while clock.get_total_seconds() < 0.03 {}
+        self.image = try Image.load(self.path) else error { self.error = error.detail; return }
+    }
+}
+
+class Loader {
+    var executor:Threading.Executor = Threading.Executor(1)
+    var job:Threading.JobHandle<LoadAsset>? = null
+    var image:Image? = null
+    var pipeline:GPU.GraphicsPipeline? = null
+    var polls:int = 0
+    var updates:int = 0
+}
+
+func configure(loader:&Loader, device:@GPU.Device, surface:@GPU.Surface, renderer:&Rendering.Renderer) {
+    loader.job = loader.executor.submit(LoadAsset(path:".silex/export-delayed-asset.png"))
+    loader.pipeline = device.graphics_pipeline(
+        GPU.ShaderProgram.hlsl(file:"Shaders/Capture.hlsl", fragment:"overlay_main"),
+        GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+    renderer.add_pass("Export.LoadedAsset", draw)
+}
+
+func ready(application:Application) bool {
+    var resources = application.resources()
+    {
+        let time = resources.get<FrameTime>()
+        assert(time.delta == 0.0)
+    }
+    {
+        let simulation = resources.get<Application.Simulation>()
+        assert(simulation.elapsed() == 0.0)
+    }
+    var loader = resources.get_mut<Loader>()
+    loader.polls++
+    assert(loader.updates == 0)
+    if var job = loader.job {
+        if !job.fence().is_complete() { return false }
+        var loaded = job.complete()
+        if let error = loaded.error { panic(error) }
+        loader.image = loaded.image
+        loader.job = null
+    }
+    return loader.image != null
+}
+
+func observe(loader:&Loader, time:@FrameTime) {
+    assert(loader.image != null)
+    if loader.updates == 0 { assert(time.delta == 0.0) }
+    loader.updates++
+}
+
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let loader = resources.get<Loader>()
+    if let image = loader.image {
+        if let pipeline = loader.pipeline {
+            pass.scissor(image.pixel(0, 0).r as int, 4, image.width(), 2)
+            pass.bind(pipeline)
+            pass.draw(3)
+        }
+    }
+}
+
+test "the initial sample waits for a real asynchronously loaded image asset" {
+    let directory = ".silex/export-prepared"
+    for index in 0...3 {
+        let removed = (try FileSystem.remove_file(directory + "/frame-00000$(index).png"))
+    }
+    let removed = (try FileSystem.remove_directory(directory))
+    var source = Image.rgba8(2, 1, [3, 0, 255, 255, 3, 0, 255, 255])
+    Image.save(source, ".silex/export-delayed-asset.png", PNG.Options())
+    var loader = Loader()
+    var application = Application(1)
+        ..add_resource(loader)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 16..height = 16..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(clear:GFX.Color.black(), antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_system(Application.Schedule.startup, configure)
+        ..add_system(Application.Schedule.update, observe)
+    assert(Rendering.export_png(application, directory, 3, 60, ready) == 3)
+    assert(loader.polls > 1 && loader.updates == 3)
+    var first = Image.load(directory + "/frame-000000.png")
+    assert(first.width() == 16 && first.height() == 16)
+    assert(first.pixel(3, 4).r == 255 && first.pixel(3, 4).b == 255)
+    assert(first.pixel(5, 4).r == 0)
+}

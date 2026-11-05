@@ -1,0 +1,78 @@
+use GFX.Application
+use GFX.Application.Session
+use GFX.Rendering.Capture.Capture
+use GFX.Rendering.Capture.State
+use GFX.Rendering.Renderer
+use GFX.Rendering.Plugin as RenderingPlugin
+use STD.FileSystem
+use STD.Path
+
+// Offline export owns this Application's run interval. Each complete PNG is
+// committed before the next simulation sample; no collection of frames grows.
+public func export_png(
+    application:Application,
+    directory:str,
+    frames:int,
+    frames_per_second:int = 60,
+    ready:(func(Application) bool)? = null
+) Result<int, str> {
+    if frames <= 0 || frames_per_second <= 0 {
+        return Result<int, str>.failure("PNG export requires a positive frame count and frame rate")
+    }
+    if directory == "" { return Result<int, str>.failure("PNG export directory cannot be empty") }
+    try Path.validate(directory) else error { return Result<int, str>.failure(error.detail) }
+    // A fresh directory prevents mixing a successful prefix with older outputs.
+    try FileSystem.create_directory(directory) else error {
+        return Result<int, str>.failure("could not create new PNG export directory '" + directory + "': " + error.detail)
+    }
+    application.require_plugin(RenderingPlugin())
+    var session = Session(application)
+    if let prepared = ready {
+        while session.is_running() && !prepared(application) { session.poll() }
+    }
+    var completed = 0
+    var failure:str? = null
+    let interval = 1.0 / (frames_per_second as float)
+    while completed < frames && session.is_running() {
+        let path = frame_path(directory, completed)
+        var ticket = try request_frame(application, path) else error { failure = error; break }
+        var delta = interval
+        if completed == 0 { delta = 0.0 }
+        try session.step(delta) else error { ticket.cancel(); failure = error; break }
+        while ticket.state() == State.pending && session.is_running() {
+            session.poll()
+            if session.is_running() { progress_capture(application) }
+        }
+        if !session.is_running() { ticket.cancel(); break }
+        if ticket.state() != State.completed {
+            if let error = ticket.error() { failure = error }
+            else { failure = "PNG export capture was cancelled" }
+            break
+        }
+        completed++
+    }
+    session.close()
+    if let error = failure { return Result<int, str>.failure("PNG export stopped after $(completed) frames: " + error) }
+    if completed != frames {
+        return Result<int, str>.failure("PNG export cancelled after $(completed) frames")
+    }
+    return Result<int, str>.success(completed)
+}
+
+func request_frame(application:Application, path:str) Result<Capture, str> {
+    var resources = application.resources()
+    var renderer = resources.get_mut<Renderer>()
+    return (try renderer.capture_png(path))
+}
+
+func progress_capture(application:Application) {
+    var resources = application.resources()
+    var renderer = resources.get_mut<Renderer>()
+    renderer.progress_captures()
+}
+
+func frame_path(directory:str, index:int) str {
+    var number = "$(index)"
+    while number.count() < 6 { number = "0" + number }
+    return directory + "/frame-" + number + ".png"
+}
