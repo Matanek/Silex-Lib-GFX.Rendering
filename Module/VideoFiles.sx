@@ -41,7 +41,7 @@ package func cleanup(directory:str, completed:int) Result<void, str> {
     for index in 0...completed {
         failure = keep_failure((try FileSystem.remove_file(Export.frame_path(directory, index))), failure)
     }
-    for name in ["movie.mp4", "audio.f32le"] {
+    for name in ["movie.mp4", "video.mp4", "audio.f32le"] {
         match (try FileSystem.symbolic_link_metadata(directory + "/" + name)) {
             success(existing) => {
                 failure = keep_failure((try FileSystem.remove_file(directory + "/" + name)), failure)

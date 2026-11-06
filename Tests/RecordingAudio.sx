@@ -1,0 +1,65 @@
+use GFX.Audio
+use GFX.Rendering.RecordingAudio
+use STD.File
+use STD.FileSystem
+use STD.Process
+use STD.Time.Clock
+
+func audio_file(suffix:str) File {
+    return File.open(".silex/recording-audio-$(Process.id())-" + suffix, File.OpenOptions(access:File.Access.write, creation:File.Creation.create_new, append:false))
+}
+func complete(track:RecordingAudio) {
+    var clock = Clock()
+    let first = clock.tick()
+    while !track.done() && clock.get_total_seconds() < 5.0 {
+        track.progress()
+        track.finish(30, 30)
+    }
+    assert(track.done(), "audio cleanup did not complete")
+}
+
+test "recording audio overflow stops its producer and closes its private file" {
+    var audio = Audio()
+    var capture = audio.capture_output(capacity_frames:1)
+    var file = audio_file("overflow.pcm")
+    var track = RecordingAudio(capture, file)
+    var clock = Clock()
+    let first = clock.tick()
+    while !capture.statistics().failed && clock.get_total_seconds() < 4.0 {}
+    assert(capture.statistics().failed)
+    complete(track)
+    assert(track.error() != null && capture.statistics().stopped)
+    match (try File.close(file)) { success => { panic("audio writer left its file open") }; failure(error) => {} }
+    var next = audio.capture_output()
+    next.stop()
+    FileSystem.remove_file(".silex/recording-audio-$(Process.id())-overflow.pcm")
+}
+
+test "recording audio write failure is recoverable and cancellation releases the mixer" {
+    var audio = Audio()
+    var capture = audio.capture_output()
+    var file = audio_file("closed.pcm")
+    File.close(file)
+    var track = RecordingAudio(capture, file)
+    var clock = Clock()
+    let first = clock.tick()
+    while capture.statistics().pending_frames == 0 && clock.get_total_seconds() < 4.0 {}
+    assert(capture.statistics().pending_frames > 0)
+    complete(track)
+    assert(track.error() != null && capture.statistics().stopped)
+    var next = audio.capture_output()
+    next.stop()
+    FileSystem.remove_file(".silex/recording-audio-$(Process.id())-closed.pcm")
+}
+
+test "recording audio cancellation before the first block closes without requiring samples" {
+    var audio = Audio()
+    var capture = audio.capture_output()
+    var file = audio_file("cancel.pcm")
+    var track = RecordingAudio(capture, file)
+    track.stop(true)
+    complete(track)
+    assert(track.error() == null && capture.statistics().stopped)
+    match (try File.close(file)) { success => { panic("cancel left its file open") }; failure(error) => {} }
+    FileSystem.remove_file(".silex/recording-audio-$(Process.id())-cancel.pcm")
+}

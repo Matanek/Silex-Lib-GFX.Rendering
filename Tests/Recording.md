@@ -69,3 +69,29 @@ claim process-tree supervision. The real runtime requires a trusted FFmpeg.
 Keep frame timing measurements separate from correctness assertions, record
 build/hardware/environment and preserve raw samples. A cross-link check is not
 native execution on that target.
+
+## Device audio and live mux
+
+`Tests/Consumer/Smokes/LiveAudio.sx` owns its source and records three short tones
+with matching flashes. Startup uses the canonical `Fixture.configure` system
+method reference; injected resource arguments remain borrows. Run `normal` and
+`variable` on a real device. The program produces quiet application tones; it
+captures no microphone or system audio. Decode all video/audio frames, compare
+marker onsets, PCM tone durations and equal track duration, and inspect packet PTS.
+The mono/stereo sample counter remains separate from video slots.
+
+Modes `cancel`, `cancel-prepare`, `shutdown`, `early-stop`, `conflict` and
+`conflict-late` cover lifecycle and exclusive outputs. `clock-error` expects an
+incoherent device clock (the observed dummy driver provides that test condition).
+Every frame checks a public input snapshot. `blocked`, `mux-cancel` and
+`mux-shutdown` take an additional marker path; their proxy announces its PID,
+then the consumer continues at least 30 input frames before cancelling/quitting.
+Check process reaping and absence of output/private directories. Proxy modes
+`mux-block` and `no-aac` affect only the final mux, forwarding live video encoding
+to the qualified FFmpeg. `slow` delays live video frames but forwards the mux;
+brief visual markers may be missed at this capture cadence. Audio must retain
+three 100 ms tones at the application’s actual marker times, without duplication.
+
+`Tests/RecordingAudio.sx` additionally exercises queue overflow, a closed PCM
+file and cancellation before the first block without requiring a GPU. Each case
+checks that detachment permits another capture and that the private file closes.

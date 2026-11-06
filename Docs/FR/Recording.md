@@ -1,10 +1,10 @@
-# Enregistrer pendant que le jeu continue
+# Enregistrer l’application en direct
 
-`Renderer.record_mp4` démarre une vidéo sans son du rendu final composé. Le jeu
-conserve sa boucle, ses entrées et son temps réel pendant la préparation,
+`Renderer.record_mp4` enregistre le rendu final composé, avec le mix Audio choisi
+si `audio:` est fourni. L’application conserve sa boucle, ses entrées et son temps réel pendant la préparation,
 l’enregistrement et la finalisation. La [démo LiveRecording](https://github.com/Matanek/Silex-Examples/blob/main/Sources/LiveRecording.sx)
 propose le bouton ou **R** pour démarrer/arrêter, **A/D** ou les flèches pour
-bouger et **Échap** pour quitter.
+bouger, **B** pour produire un bip et un flash, et **Échap** pour quitter.
 
 ## Démarrer et conserver le résultat
 
@@ -32,6 +32,29 @@ Attendre `completed` avant d’annoncer le fichier ou de quitter l’application
 Les états suivent `preparing`, `recording`, `stopping`, puis `completed`, `failed`
 ou `cancelled`. Une session arrêtée pendant sa préparation est annulée.
 `path()` conserve le chemin fourni ; `frames_per_second()` conserve la cadence.
+
+## Ajouter le mix sonore
+
+Une méthode dont l’objet possède `var audio:Audio = Audio()` peut fournir
+`audio:self.audio` à `record_mp4`. Le parcours complet est dans la démo et le
+[consommateur public](../../Tests/Consumer/Smokes/LiveAudio.sx). Sans cet argument,
+la session reste muette. `Audio.offline` appartient à l’export de timeline
+[avec son](Video.md), pas à l’enregistrement du périphérique.
+
+La session conserve sa source jusqu’au nettoyage. Elle observe son mix final,
+gain et traitements compris, sans arrêter sa lecture. Le microphone, la webcam,
+le son système et les autres applications restent hors de cette capture.
+Le FFmpeg fourni doit aussi lire `f32le` et encoder AAC ; une capacité manquante
+fait échouer la session avec son diagnostic, sans publier une vidéo muette.
+
+Le son avance par frames audio entières. Une image dupliquée ne duplique aucun
+sample ; un retard d’images n’étire pas les bips. Le délai du premier bloc est
+placé dans la chronologie, puis le PCM est ajusté par silence ou coupe à la durée
+vidéo entière lors de la finalisation. La vidéo déjà encodée est copiée au mux
+avec l’AAC ; elle n’est pas réencodée. La progression audio est comparée à la
+période monotone à l’arrêt, avec une tolérance d’un bloc de mix et d’un pas vidéo.
+Un périphérique dont le compteur ne suit pas le temps réel fait échouer la session.
+L’origine observée du mix ne mesure pas la latence physique des haut-parleurs.
 
 ## Temps réel et saturation
 
@@ -73,6 +96,16 @@ restent bornés par les dimensions ; il n’y a pas de séquence PNG temporaire.
 La limite de transfert est 64 Mio, avec un pitch aligné, comme pour le PNG.
 Le rendu résolu, les buffers de l’encodeur et la vidéo sur disque s’y ajoutent.
 
+Avec son, une file de 96 000 frames et un seul job de vidange sont ajoutés, sur
+un worker distinct du writer vidéo. Cela représente 768 000 octets de PCM stéréo
+et deux secondes à 48 kHz, plus les blocs de transfert possédés. La callback
+native d’observation n’alloue pas, n’attend pas et n’écrit aucun fichier. Une file
+pleine fait échouer la capture tout en laissant le mix continuer à jouer.
+Le PCM privé sur disque coûte `durée × fréquence × canaux × 4` octets ; la vidéo
+intermédiaire, le mux et la copie de publication s’y ajoutent. Aucun coût nul ni
+cadence minimale n’est promis. Les IO et l’arrêt synchronisé du mix sont traités
+sur le worker ; la progression principale observe seulement les travaux prêts.
+
 Le renderer observe la fence sans attendre. Un worker dédié mappe le transfert
 prêt, copie/normalise les pixels et écrit le pipe ; il ne monopolise pas le pool
 des systèmes Application. La soumission GPU, la vérification de disponibilité,
@@ -96,9 +129,10 @@ a une limite de dix secondes ; son annulation peut donc rester en `stopping`
 jusqu’au retour de la sonde. Cette attente ne bloque pas les frames, mais une
 fermeture de l’application peut attendre la fin de cette préparation.
 
-Une écriture d’image et la finalisation de l’encodeur ont chacune une limite de
+Une écriture d’image, une écriture/finalisation audio et la finalisation de l’encodeur ont chacune une limite de
 dix secondes, observée par le renderer ; un dépassement termine l’encodeur et
-rend l’échec récupérable. Un programme fourni doit être un FFmpeg de confiance :
+rend l’échec récupérable. Une IO disque déjà engagée doit encore terminer avant
+le nettoyage ; quitter l’application peut attendre son worker. Un programme fourni doit être un FFmpeg de confiance :
 le pilote contrôle ce processus, pas une famille arbitraire de descendants.
 
 Les diagnostics conservés sont limités à 16 Kio. Une destination existante, y

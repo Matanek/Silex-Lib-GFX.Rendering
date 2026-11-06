@@ -1,0 +1,166 @@
+use GFX.Audio
+use GFX.Rendering.Soundtrack
+use STD.File
+use STD.IO
+use STD.Threading
+use STD.Time.Clock
+
+// Separate from the image writer: one bounded PCM drain in flight. File IO
+// and capture detachment run on this worker, never in the render progress call.
+package class RecordingAudio {
+    private var capture:Audio.OutputCapture
+    private var file:File
+    private var executor:Threading.Executor = Threading.Executor(1)
+    private var drain:Threading.JobHandle<DrainCapture>? = null
+    private var closing:Threading.JobHandle<FinishCapture>? = null
+    private var written:int = 0
+    private var stopping:bool = false
+    private var stopped:bool = false
+    private var aborting:bool = false
+    private var closed:bool = false
+    private var failure:str? = null
+    private var stopped_at:Audio.OutputCaptureInfo? = null
+    private var rate:int
+    private var channels:int
+    private var job_start:float = 0.0
+    private var clock:Clock = Clock()
+
+    init(capture:Audio.OutputCapture, file:File) {
+        self.capture = capture
+        self.file = file
+        let format = capture.output_format()
+        self.rate = format.sample_rate
+        self.channels = format.channels
+        let first = self.clock.tick()
+    }
+    func elapsed() float64 { return self.capture.statistics().elapsed_seconds }
+    func error() str? { return self.failure }
+    func done() bool { return self.closed }
+    func sample_rate() int { return self.rate }
+    func channel_count() int { return self.channels }
+
+    func stop(abort:bool) {
+        if abort { self.aborting = true }
+        if self.stopping { return }
+        self.stopping = true
+        self.stopped_at = self.capture.statistics()
+    }
+
+    func progress() {
+        if self.closed { return }
+        if var handle = self.closing {
+            if !handle.fence().is_complete() {
+                if self.clock.get_total_seconds() - self.job_start > 10.0 && self.failure == null { self.failure = "MP4 audio file finalization timed out" }
+                return
+            }
+            let done = handle.complete()
+            self.closing = null
+            self.closed = true
+            if let error = done.error { if self.failure == null { self.failure = error } }
+            return
+        }
+        if var handle = self.drain {
+            if !handle.fence().is_complete() {
+                if self.clock.get_total_seconds() - self.job_start > 10.0 && self.failure == null { self.failure = "MP4 audio writer timed out" }
+                return
+            }
+            let done = handle.complete()
+            self.drain = null
+            self.written = done.written
+            if done.stopping { self.stopped = true }
+            if let error = done.error { if self.failure == null { self.failure = error } }
+        }
+        if self.failure != null { self.stop(true) }
+        if self.stopped { return }
+        let info = self.capture.statistics()
+        if info.failed && self.failure == null { self.failure = "MP4 audio capture overflowed or changed format"; self.stop(true) }
+        if self.stopping || info.pending_frames > 0 {
+            self.drain = self.executor.submit(DrainCapture(capture:self.capture, file:self.file,
+                channels:self.channels, written:self.written, stopping:self.stopping, abort:self.aborting))
+            self.job_start = self.clock.get_total_seconds()
+        }
+    }
+
+    // target is known after the final video frame. Only the worker resizes,
+    // flushes and closes PCM. Extending the file writes silence at the boundary.
+    func finish(frames:int, video_rate:int) {
+        if self.closed || self.closing != null || !self.stopped || self.drain != null { return }
+        var target = 0
+        if !self.aborting && self.failure == null {
+            match (try Soundtrack.end_frame(frames, video_rate, self.rate)) {
+                success(value) => { target = value }
+                failure(error) => { self.failure = error; self.aborting = true }
+            }
+            if let info = self.stopped_at {
+                let audio_end = info.first_frame_seconds + (info.produced_frames as float64) / (self.rate as float64)
+                let tolerance = (info.max_block_frames as float64) / (self.rate as float64) + 1.0 / (video_rate as float64)
+                let difference = audio_end - info.elapsed_seconds
+                if info.produced_frames == 0 || difference > tolerance || difference < -tolerance {
+                    self.failure = "MP4 audio sample clock did not follow real elapsed time"
+                    self.aborting = true
+                }
+            }
+        }
+        self.closing = self.executor.submit(FinishCapture(file:self.file, frames:target, channels:self.channels, abort:self.aborting))
+        self.job_start = self.clock.get_total_seconds()
+    }
+
+    func shutdown() {
+        self.stop(true)
+        self.executor.wait_idle()
+        self.progress()
+        self.executor.wait_idle()
+        self.progress()
+        self.finish(0, 30)
+        self.executor.wait_idle()
+        self.progress()
+    }
+    drop { self.shutdown() }
+}
+
+struct DrainCapture:Threading.Job {
+    var capture:Audio.OutputCapture
+    var file:File
+    let channels:int
+    var written:int
+    let stopping:bool
+    let abort:bool
+    var error:str? = null
+    func execute() {
+        if self.stopping { self.capture.stop() }
+        if self.abort { return }
+        var budget = self.capture.statistics().pending_frames
+        while budget > 0 {
+            var count = budget
+            if count > 4096 { count = 4096 }
+            let block = try self.capture.read_f32le(count) else error { self.error = error.detail; return }
+            if block.frames == 0 { return }
+            if self.written == 0 && block.first_frame > 0 {
+                if block.first_frame > 9_223_372_036_854_775_807 / (self.channels * 4) { self.error = "MP4 audio offset exceeds file range"; return }
+                // A sparse leading gap reads as zero PCM, without allocating it.
+                let position = try self.file.seek(block.first_frame * self.channels * 4, File.SeekFrom.start) else error { self.error = error.detail; return }
+                self.written = block.first_frame
+            }
+            if block.first_frame != self.written { self.error = "MP4 audio capture contains a discontinuity"; return }
+            try IO.write_all<File>(self.file, @block.bytes[0:block.bytes.count()]) else error { self.error = error.detail; return }
+            self.written += block.frames
+            budget -= block.frames
+        }
+    }
+}
+
+struct FinishCapture:Threading.Job {
+    var file:File
+    let frames:int
+    let channels:int
+    let abort:bool
+    var error:str? = null
+    func execute() {
+        if !self.abort {
+            if self.frames <= 0 || self.frames > 9_223_372_036_854_775_807 / (self.channels * 4) { self.error = "MP4 audio duration exceeds file range" }
+            else { match (try self.file.set_length(self.frames * self.channels * 4)) { failure(error) => { self.error = error.detail }; success => {} } }
+            match (try self.file.flush()) { failure(error) => { if self.error == null { self.error = error.detail } }; success => {} }
+        }
+        match (try File.close(self.file)) { failure(error) => { if self.error == null { self.error = error.detail } }; success => {} }
+    }
+}

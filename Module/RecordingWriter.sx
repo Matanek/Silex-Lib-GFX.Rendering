@@ -1,4 +1,7 @@
+use GFX.Audio
 use GFX.GPU
+use GFX.Rendering.RecordingAudio
+use STD.File
 use GFX.Rendering.VideoEncoder
 use GFX.Rendering.VideoFiles
 use STD.Subprocess
@@ -10,6 +13,8 @@ package struct PrepareRecording:Threading.Job {
     let width:int
     let height:int
     let rate:int
+    var audio:Audio? = null
+    var soundtrack:RecordingAudio? = null
     var directory:str? = null
     var child:Subprocess.Child? = null
     var error:str? = null
@@ -18,6 +23,8 @@ package struct PrepareRecording:Threading.Job {
         try VideoEncoder.probe(self.ffmpeg) else error { self.error = error; return }
         let directory = try VideoFiles.prepare(self.path) else error { self.error = error; return }
         self.directory = directory
+        var movie = "movie.mp4"
+        if self.audio != null { movie = "video.mp4" }
         self.child = try Subprocess.spawn(Subprocess.SpawnCommand(
             executable:self.ffmpeg,
             arguments:["-nostdin", "-hide_banner", "-loglevel", "error",
@@ -25,9 +32,21 @@ package struct PrepareRecording:Threading.Job {
                 "-video_size", "$(self.width)x$(self.height)", "-framerate", "$(self.rate)",
                 "-i", "pipe:0", "-an", "-c:v", "mpeg4", "-q:v", "2", "-bf", "0",
                 "-pix_fmt", "yuv420p", "-threads", "1", "-filter_threads", "1",
-                "-movflags", "+faststart", "-f", "mp4", "-n", "movie.mp4"],
+                "-movflags", "+faststart", "-f", "mp4", "-n", movie],
             current_directory:directory, inherit_environment:false, environment:[]
         )) else error { self.error = "could not start FFmpeg: " + error.detail; return }
+        if var audio = self.audio {
+            var file = try File.open(directory + "/audio.f32le", File.OpenOptions(access:File.Access.write, creation:File.Creation.create_new, append:false)) else error { self.error = error.detail; return }
+            var capture = try audio.capture_output() else error {
+                self.error = error.detail
+                match (try File.close(file)) {
+                    failure(cleanup) => { self.error = error.detail + "; audio file close failed: " + cleanup.detail }
+                    success => {}
+                }
+                return
+            }
+            self.soundtrack = RecordingAudio(capture, file)
+        }
     }
 }
 
@@ -78,4 +97,23 @@ func write_frame(child:Subprocess.Child, pixels:@uint8[]) Result<void, str> {
         offset += count
     }
     return Result<void, str>.success()
+}
+
+package struct StartRecordingMux:Threading.Job {
+    let ffmpeg:str
+    let directory:str
+    let sample_rate:int
+    let channels:int
+    var child:Subprocess.Child? = null
+    var error:str? = null
+    func execute() {
+        var child = try Subprocess.spawn(Subprocess.SpawnCommand(executable:self.ffmpeg,
+            arguments:["-nostdin", "-hide_banner", "-loglevel", "error", "-i", "video.mp4",
+                "-f", "f32le", "-ar", "$(self.sample_rate)", "-ac", "$(self.channels)", "-i", "audio.f32le",
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-threads", "1", "-movflags", "+faststart", "-f", "mp4", "-n", "movie.mp4"],
+            current_directory:self.directory, inherit_environment:false, environment:[])) else error { self.error = error.detail; return }
+        self.child = child
+        try child.close_standard_input() else error { self.error = error.detail; return }
+    }
 }

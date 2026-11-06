@@ -1,3 +1,4 @@
+use GFX.Audio
 use GFX.Application
 use GFX.Color
 use GFX.Rendering.FrameGraph
@@ -72,7 +73,7 @@ public class Renderer {
         return Result<Capture, str>.failure("could not create the capture queue")
     }
 
-    func record_mp4(path:str, ffmpeg:str, frames_per_second:int = 30) Result<Recording, str> {
+    func record_mp4(path:str, ffmpeg:str, frames_per_second:int = 30, audio:Audio? = null) Result<Recording, str> {
         if frames_per_second <= 0 || frames_per_second > 65_535 { return Result<Recording, str>.failure("MP4 recording rate must be between 1 and 65535 Hz") }
         if path == "" { return Result<Recording, str>.failure("MP4 output path cannot be empty") }
         try Path.validate(path) else error { return Result<Recording, str>.failure(error.detail) }
@@ -81,7 +82,7 @@ public class Renderer {
         if var previous = self.recording {
             if !previous.terminal() { return Result<Recording, str>.failure("an MP4 recording is already pending") }
         }
-        var recording = Recording(path, ffmpeg, frames_per_second)
+        var recording = Recording(path, ffmpeg, frames_per_second, audio)
         self.recording = recording
         return Result<Recording, str>.success(recording)
     }

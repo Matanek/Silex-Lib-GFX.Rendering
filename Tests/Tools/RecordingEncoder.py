@@ -13,6 +13,15 @@ if sys.argv[1:] == ['-version']:
         time.sleep(60)
     print('other program' if mode == 'wrong-banner' else 'ffmpeg version recording-fixture')
     sys.exit(0)
+if mode in ('mux-block', 'mux-error', 'no-aac'):
+    if '-video_size' in sys.argv:
+        os.execv(config['ffmpeg'], [config['ffmpeg'], *sys.argv[1:]])
+    if mode == 'mux-block':
+        Path(config['marker']).write_text(str(os.getpid()))
+        time.sleep(60)
+        sys.exit(9)
+    sys.stderr.write('Unknown encoder aac\n' if mode == 'no-aac' else 'deliberate mux failure\n')
+    sys.exit(8)
 if mode == 'error':
     sys.stderr.write('deliberate encoder failure\n')
     sys.exit(7)
@@ -29,6 +38,8 @@ if mode == 'blocked':
     sys.exit(9)
 assert mode == 'slow'
 args = sys.argv[1:]
+if '-video_size' not in args:
+    os.execv(config['ffmpeg'], [config['ffmpeg'], *args])
 width, height = map(int, args[args.index('-video_size') + 1].split('x'))
 encoder = subprocess.Popen([config['ffmpeg'], *args], stdin=subprocess.PIPE)
 Path(config['marker']).write_text(str(os.getpid()))

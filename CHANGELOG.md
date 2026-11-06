@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `record_mp4(..., audio:audio)` includes the device mix with a bounded queue and separate audio worker, integer timeline, AAC mux without video re-encoding, and explicit overflow or clock-mismatch failure.
+
 - `export_mp4(..., audio:audio)` includes an Audio.offline mix as synchronized AAC: cumulative rounding, block rendering/writing on a worker, finalization and cleanup of both tracks. Silent exports remain compatible.
 
 - `Renderer.record_mp4` records the composed render while playing: owned session, asynchronous stop/finalization, bounded queue, real duration with duplication and counters, cancellation and recoverable errors. FFmpeg remains explicit; inactive capture performs no transfer.

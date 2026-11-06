@@ -1,10 +1,10 @@
-# Record while the game keeps running
+# Record the application live
 
-`Renderer.record_mp4` starts a silent video of the final composed render. The
-game keeps its loop, input and real time during preparation, recording and
+`Renderer.record_mp4` records the final composed render, including the selected Audio mix when `audio:` is supplied. The
+application keeps its loop, input and real time during preparation, recording and
 finalization. The [LiveRecording demo](https://github.com/Matanek/Silex-Examples/blob/main/Sources/LiveRecording.sx)
 uses the button or **R** to start/stop, **A/D** or the arrow keys to move, and
-**Escape** to quit.
+**B** for a beep and flash, and **Escape** to quit.
 
 ## Start and keep the result
 
@@ -32,6 +32,27 @@ Wait for `completed` before announcing the file or quitting the application.
 States follow `preparing`, `recording`, `stopping`, then `completed`, `failed`
 or `cancelled`. Stopping during preparation cancels the session.
 `path()` retains the supplied path; `frames_per_second()` retains the rate.
+
+## Include the audio mix
+
+A method whose object owns `var audio:Audio = Audio()` can pass `audio:self.audio`
+to `record_mp4`. See the demo and [public consumer](../../Tests/Consumer/Smokes/LiveAudio.sx).
+Omitting this argument keeps the session silent. `Audio.offline` belongs to
+[timeline export](Video.md), not device recording.
+
+The session retains its source until cleanup. It observes the final mix,
+including gain and processing, while playback continues. This captures no
+microphone, webcam, system sound or other applications. FFmpeg must also read
+`f32le` and encode AAC. A missing capability fails the session with diagnostics;
+it does not publish a silent fallback.
+
+Sound advances in integer audio frames. Duplicated images never duplicate
+samples or stretch tones. The first block’s delay is placed on the timeline;
+finalization pads or trims PCM to the integer video duration. The encoded video
+is copied into the AAC mux without re-encoding. At stop, audio progress is
+compared with the monotonic period, allowing one mixer block and one video frame.
+A device whose counter does not follow real time fails the session. The mix
+origin does not measure physical speaker latency.
 
 ## Real time and saturation
 
@@ -72,6 +93,15 @@ by the dimensions; there is no temporary PNG sequence. The transfer limit is
 64 MiB, including aligned pitch, as for PNG. The resolved render, encoder buffers
 and video on disk add to this memory.
 
+Audio adds a 96,000-frame queue and one drain job on a worker separate from the
+video writer. Stereo PCM occupies 768,000 bytes, or two seconds at 48 kHz, plus
+owned transfer blocks. The native observer does not allocate, wait or write
+files. A full queue fails capture while playback continues. Private PCM storage
+uses `duration × sample rate × channels × 4` bytes; intermediate video, mux and
+publication copies require additional disk space. No zero-cost or minimum
+frame-rate guarantee applies. Audio IO and synchronized detachment run on the
+worker; main progress only observes ready work.
+
 The renderer observes the fence without waiting. A dedicated worker maps the
 ready transfer, copies/normalizes pixels and writes the pipe; it does not occupy
 the Application systems pool. GPU submission, readiness checks, process tracking
@@ -93,9 +123,10 @@ before closing their resources. FFmpeg preparation has a ten-second limit;
 cancellation can therefore stay in `stopping` until the probe returns. This
 wait does not block frames, but application shutdown can wait for preparation.
 
-An image write and encoder finalization each have a ten-second limit observed
+An image write, audio write/file finalization and encoder finalization each have a ten-second limit observed
 by the renderer; expiry terminates the encoder and returns a recoverable failure.
-The supplied program must be a trusted FFmpeg: the driver controls that process,
+A disk IO already in progress must still return before cleanup, so application
+shutdown may wait for its worker. The supplied program must be a trusted FFmpeg: the driver controls that process,
 not an arbitrary family of descendants.
 
 Retained diagnostics are limited to 16 KiB. An existing destination, including

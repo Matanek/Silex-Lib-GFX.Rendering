@@ -1,0 +1,138 @@
+use GFX.Application
+use GFX.Audio
+use GFX.GPU
+use GFX.Input
+use GFX.Input.State as InputState
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use STD.Math
+use STD.Process
+use STD.Time.Clock
+use STD.FileSystem
+use STD.File
+
+class Fixture {
+    // The recording retains its source. Keep an owned Audio handle in this
+    // feature; injected system resource parameters are deliberate borrows.
+    var audio:Audio = Audio()
+    let ffmpeg:str
+    let output:str
+    let mode:str
+    let marker:str = ""
+    var waiting:int = 0
+    var inputs:int = 0
+    var recording:Rendering.Recording? = null
+    var pipeline:GPU.GraphicsPipeline? = null
+    var sound:Audio.Sound? = null
+    var phase:int = 0
+    var flash_until:float = 0.0
+    var frames:int = 0
+    var recording_frames:int = 0
+    var clock:Clock = Clock()
+    func configure(renderer:&Rendering.Renderer, device:@GPU.Device, surface:@GPU.Surface) {
+        let rate = self.audio.output_format().sample_rate
+        var samples:float32[] = []
+        for index in 0...rate / 10 {
+            samples.append(0.04 * Math.sin(2.0 * Math.pi() * 880.0 * (index as float) / (rate as float)))
+        }
+        self.sound = self.audio.create(@samples[0:samples.count()], sample_rate:rate)
+        self.pipeline = device.graphics_pipeline(GPU.ShaderProgram.hlsl(file:"../Tests/Shaders/Capture.hlsl", fragment:"overlay_main"), GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+        renderer.add_pass("LiveAudio.Flash", draw)
+        self.recording = renderer.record_mp4(self.output, ffmpeg:self.ffmpeg, audio:self.audio)
+        let first = self.clock.tick()
+    }
+
+}
+func observe(fixture:&Fixture, input:@Input, controller:&Application.Controller) {
+    fixture.frames++
+    if input.is_pressed(Input.Key.d) { fixture.inputs++ }
+    assert(fixture.inputs == fixture.frames)
+    if var recording = fixture.recording {
+        let stats = recording.statistics()
+        if fixture.mode == "blocked" || fixture.mode == "mux-cancel" || fixture.mode == "mux-shutdown" {
+            match (try FileSystem.metadata(fixture.marker)) {
+                success(info) => { fixture.waiting++ }
+                failure(error) => {}
+            }
+            if fixture.waiting >= 30 {
+                if fixture.mode == "mux-shutdown" { controller.stop() }
+                else { recording.cancel() }
+            }
+        }
+        assert(stats.pending_images <= 1 && stats.peak_pending_images <= 1)
+        if fixture.mode == "cancel-prepare" && fixture.frames == 2 { recording.cancel() }
+        if recording.state() == Rendering.Recording.State.recording {
+            fixture.recording_frames++
+            if fixture.mode == "cancel" && stats.duration_seconds >= 0.3 { recording.cancel() }
+            if fixture.mode == "shutdown" && stats.duration_seconds >= 0.3 { controller.stop() }
+            if fixture.mode == "early-stop" && fixture.recording_frames == 1 { recording.stop() }
+            if fixture.phase < 3 && stats.duration_seconds >= 0.5 + (fixture.phase as float) * 0.7 {
+                fixture.phase++
+                fixture.flash_until = stats.duration_seconds + 0.1
+                if let sound = fixture.sound { let playing = fixture.audio.play(sound) }
+                print("MARK $(fixture.phase) $(stats.duration_seconds)")
+            }
+            if fixture.mode == "conflict-late" && stats.duration_seconds >= 0.3 {
+                STD.File.write_all(fixture.output, "preserve competing output")
+                recording.stop()
+            }
+            if stats.duration_seconds >= 2.5 { recording.stop() }
+        }
+        if recording.state() == Rendering.Recording.State.completed {
+            assert(fixture.mode == "normal" || fixture.mode == "variable" || fixture.mode == "slow")
+            assert(stats.frames == stats.captured + stats.duplicates && fixture.phase == 3)
+            print("LIVEAUDIO frames=$(stats.frames) captured=$(stats.captured) duplicates=$(stats.duplicates) seconds=$(stats.duration_seconds) rendered=$(fixture.frames)")
+            controller.stop()
+        }
+        if recording.state() == Rendering.Recording.State.cancelled { assert(fixture.mode == "cancel" || fixture.mode == "cancel-prepare" || fixture.mode == "blocked" || fixture.mode == "mux-cancel"); controller.stop() }
+        if recording.state() == Rendering.Recording.State.failed {
+            if let error = recording.error() { print("EXPECTED_OR_FAILURE " + error) }
+            assert(fixture.mode == "clock-error" || fixture.mode == "encoder-error" || fixture.mode == "early-stop" || fixture.mode == "conflict" || fixture.mode == "conflict-late")
+            controller.stop()
+        }
+    }
+    assert(fixture.clock.get_total_seconds() < 30.0, "live audio did not finish")
+}
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if let recording = fixture.recording {
+        let seconds = recording.statistics().duration_seconds
+        if fixture.phase > 0 && seconds < fixture.flash_until {
+            if let pipeline = fixture.pipeline { pass.bind(pipeline); pass.draw(3) }
+        }
+    }
+}
+func enter(state:&InputState) { state.entered_keys = [Input.Key.d] }
+func pace(application:Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if fixture.mode == "variable" && fixture.frames % 10 == 0 {
+        // A real pause in application progress, independent of the audio device.
+        var clock = Clock()
+        let first = clock.tick()
+        while clock.get_total_seconds() < 0.07 {}
+    }
+}
+func main() {
+    let arguments = Process.arguments()
+    assert(arguments.count() >= 3)
+    var mode = "normal"
+    if arguments.count() > 3 { mode = arguments[3] }
+    var marker = ""
+    if arguments.count() > 4 { marker = arguments[4] }
+    var fixture = Fixture(ffmpeg:arguments[1], output:arguments[2], mode:mode, marker:marker)
+    var application = Application(1)
+        ..add_resource(fixture)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 64..height = 64..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_plugin(Application.FramePacing(60))
+        ..add_system(Application.Schedule.startup, Fixture.configure)
+        ..add_system(Application.Schedule.update, enter)
+        ..add_system(Application.Schedule.update, observe)
+        ..add_after_system(Application.Schedule.render, pace)
+    application.run()
+    if mode != "normal" && mode != "variable" && mode != "slow" && mode != "conflict" && mode != "conflict-late" {
+        match (try FileSystem.metadata(arguments[2])) { success(info) => { panic("failed recording published output") }; failure(error) => {} }
+    }
+}

@@ -1,4 +1,7 @@
+use GFX.Audio
 use GFX.GPU
+use GFX.Rendering.RecordingAudio
+use GFX.Rendering.RecordingWriter.StartRecordingMux
 use GFX.Rendering.RecordingWriter.PrepareRecording
 use GFX.Rendering.RecordingWriter.WriteRecordingFrame
 use GFX.Rendering.VideoFiles
@@ -32,6 +35,10 @@ public nocopy class Recording {
     private var executor:Threading.Executor? = null
     private var preparation:Threading.JobHandle<PrepareRecording>? = null
     private var writer:Threading.JobHandle<WriteRecordingFrame>? = null
+    private var audio:Audio? = null
+    private var soundtrack:RecordingAudio? = null
+    private var mux_preparation:Threading.JobHandle<StartRecordingMux>? = null
+    private var muxing:bool = false
     private var publication:Threading.JobHandle<VideoFiles.PublishMovie>? = null
     private var child:Subprocess.Child? = null
     private var status:Subprocess.ExitStatus? = null
@@ -44,7 +51,7 @@ public nocopy class Recording {
     private var height:int = 0
     private var begun:bool = false
     private var clock:Clock = Clock()
-    private var stop_seconds:float? = null
+    private var stop_seconds:float64? = null
     private var cancelled:bool = false
     private var input_closed:bool = false
     private var sample_slot:int = -1
@@ -56,10 +63,11 @@ public nocopy class Recording {
     private var opaque:bool = true
     private var deferred_readbacks:int = 0
 
-    package init(path:str, ffmpeg:str, rate:int) {
+    package init(path:str, ffmpeg:str, rate:int, audio:Audio?) {
         self.output = path
         self.ffmpeg = ffmpeg
         self.rate = rate
+        self.audio = audio
         self.executor = Threading.Executor(1)
     }
 
@@ -71,16 +79,17 @@ public nocopy class Recording {
         var pending = 0
         if self.transfer != null || self.writer != null { pending = 1 }
         let seconds = self.elapsed()
-        let due = Math.ceil(seconds * (self.rate as float)) as int
+        let due = Math.ceil(seconds * (self.rate as float64)) as int
         var dropped = due - self.captured
         if dropped < 0 { dropped = 0 }
         return Statistics(frames:self.written, captured:self.captured, duplicates:self.duplicated,
-            dropped:dropped, pending_images:pending, peak_pending_images:self.peak, duration_seconds:seconds)
+            dropped:dropped, pending_images:pending, peak_pending_images:self.peak, duration_seconds:round_float<float>(seconds))
     }
 
     func stop() {
         if self.terminal() || self.stop_seconds != null { return }
-        self.stop_seconds = self.clock.get_total_seconds()
+        self.stop_seconds = self.elapsed()
+        if var soundtrack = self.soundtrack { soundtrack.stop(false) }
         self.current = State.stopping
     }
 
@@ -101,9 +110,10 @@ public nocopy class Recording {
         self.kill_child()
     }
 
-    private func elapsed() float {
+    private func elapsed() float64 {
         if let seconds = self.stop_seconds { return seconds }
-        return self.clock.get_total_seconds()
+        if let soundtrack = self.soundtrack { return soundtrack.elapsed() }
+        return self.clock.get_total_seconds() as float64
     }
 
     // One bounded progress call per render. Never join pending work here.
@@ -120,7 +130,7 @@ public nocopy class Recording {
                 return
             }
             if var executor = self.executor {
-                self.preparation = executor.submit(PrepareRecording(path:self.output, ffmpeg:self.ffmpeg, width:width, height:height, rate:self.rate))
+                self.preparation = executor.submit(PrepareRecording(path:self.output, ffmpeg:self.ffmpeg, width:width, height:height, rate:self.rate, audio:self.audio))
             }
             return
         }
@@ -130,6 +140,8 @@ public nocopy class Recording {
             self.preparation = null
             self.directory = prepared.directory
             self.child = prepared.child
+            self.soundtrack = prepared.soundtrack
+            self.audio = null
             if self.stop_seconds != null { self.cancelled = true; self.kill_child() }
             elif let error = prepared.error { self.fail(error) }
             else {
@@ -137,6 +149,21 @@ public nocopy class Recording {
                 let first = self.clock.tick()
                 self.current = State.recording
             }
+        }
+        if var soundtrack = self.soundtrack {
+            soundtrack.progress()
+            if !self.cancelled && self.failure == null { if let error = soundtrack.error() { self.fail(error) } }
+        }
+        if var handle = self.mux_preparation {
+            if !handle.fence().is_complete() { return }
+            let ready = handle.complete()
+            self.mux_preparation = null
+            self.child = ready.child
+            self.status = null
+            self.diagnostics = []
+            self.truncated = false
+            self.job_started = self.clock.get_total_seconds()
+            if let error = ready.error { self.fail("MP4 audio mux could not start: " + error) }
         }
         self.poll_child()
         self.collect_writer()
@@ -175,7 +202,7 @@ public nocopy class Recording {
 
     package func needs_frame() bool {
         if self.current != State.recording || self.stop_seconds != null || self.writer != null || self.transfer != null { return false }
-        let slot = Math.floor(self.clock.get_total_seconds() * (self.rate as float)) as int
+        let slot = Math.floor(self.elapsed() * (self.rate as float64)) as int
         return slot > self.sample_slot
     }
 
@@ -186,7 +213,7 @@ public nocopy class Recording {
             failure(error) => { self.fail(error) }
             success(transfer) => {
                 self.transfer = transfer
-                self.sample_slot = Math.floor(self.clock.get_total_seconds() * (self.rate as float)) as int
+                self.sample_slot = Math.floor(self.elapsed() * (self.rate as float64)) as int
                 self.peak = 1
             }
         }
@@ -243,7 +270,7 @@ public nocopy class Recording {
     private func progress_stop() {
         if var transfer = self.transfer { transfer.cancel(); self.transfer = null }
         if self.last_pixels.is_empty() { self.fail("MP4 recording stopped before its first image completed"); return }
-        var target = Math.ceil(self.elapsed() * (self.rate as float)) as int
+        var target = Math.ceil(self.elapsed() * (self.rate as float64)) as int
         if target < 1 { target = 1 }
         if self.written < target { self.submit_writer(null, target - 1); return }
         if !self.input_closed {
@@ -257,6 +284,23 @@ public nocopy class Recording {
             match status {
                 exited(code) => { if code != 0 { self.fail("FFmpeg exited with code $(code): " + self.diagnostic()); return } }
                 signaled(signal) => { self.fail("FFmpeg terminated by signal $(signal): " + self.diagnostic()); return }
+            }
+            if var soundtrack = self.soundtrack {
+                soundtrack.finish(self.written, self.rate)
+                if !soundtrack.done() { return }
+                if let error = soundtrack.error() { self.fail(error); return }
+                if !self.muxing {
+                    self.muxing = true
+                    self.child = null
+                    self.status = null
+                    if let directory = self.directory {
+                        if var executor = self.executor {
+                            self.mux_preparation = executor.submit(StartRecordingMux(ffmpeg:self.ffmpeg, directory:directory,
+                                sample_rate:soundtrack.sample_rate(), channels:soundtrack.channel_count()))
+                        }
+                    }
+                    return
+                }
             }
             if let directory = self.directory {
                 if var executor = self.executor {
@@ -295,6 +339,15 @@ public nocopy class Recording {
         // A live cancellation never invokes Child.drop while it could waitpid.
         // progress drains one nonblocking event per render until exit is known.
         if self.child != null && self.status == null { return }
+        if self.mux_preparation != null { return }
+        if var soundtrack = self.soundtrack {
+            if self.cancelled || self.failure != null { soundtrack.stop(true) }
+            soundtrack.progress()
+            soundtrack.finish(self.written, self.rate)
+            if !soundtrack.done() { return }
+        }
+        self.soundtrack = null
+        self.audio = null
         // All accepted worker jobs have completed before their handles close.
         self.child = null
         if let directory = self.directory {
@@ -329,6 +382,7 @@ public nocopy class Recording {
     package func shutdown() {
         if self.terminal() { return }
         self.cancel()
+        if var soundtrack = self.soundtrack { soundtrack.shutdown() }
         if var executor = self.executor { executor.wait_idle() }
         self.progress(self.width, self.height)
         self.kill_child()
@@ -337,6 +391,7 @@ public nocopy class Recording {
         if !self.terminal() {
             // Only application shutdown may synchronously reap an already
             // killed child; no writer/publication job still owns its handles.
+            if var soundtrack = self.soundtrack { soundtrack.shutdown() }
             self.child = null
             self.finish()
         }
