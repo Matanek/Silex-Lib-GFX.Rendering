@@ -41,7 +41,8 @@ public func export_png(
 package func render_sequence(
     application:Application, session:Session, directory:str, frames:int,
     frames_per_second:int, ready:(func(Application) bool)?, progress:&SequenceProgress,
-    width:int = 0, height:int = 0, label:str = "PNG"
+    width:int = 0, height:int = 0, label:str = "PNG",
+    after_sample:(func(Application, int) Result<void, str>)? = null
 ) Result<int, str> {
     if let prepared = ready {
         while session.is_running() && !prepared(application) { session.poll() }
@@ -61,6 +62,9 @@ package func render_sequence(
         }
         if ticket.state() == State.completed {
             progress.completed++
+            if let collect = after_sample {
+                try collect(application, progress.completed - 1) else error { failure = error; break }
+            }
             try require_dimensions(application, width, height) else error { failure = error; break }
         } else {
             if !session.is_running() { ticket.cancel(); break }

@@ -93,3 +93,5 @@ Recovery after a crash or forced process termination is not guaranteed.
 [Back to rendering](README.md).
 
 To record a game in real time, use [interactive recording](Recording.md).
+
+The optional application soundtrack is described in [Export a video with audio](Soundtrack.md).

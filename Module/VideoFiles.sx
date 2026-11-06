@@ -41,11 +41,13 @@ package func cleanup(directory:str, completed:int) Result<void, str> {
     for index in 0...completed {
         failure = keep_failure((try FileSystem.remove_file(Export.frame_path(directory, index))), failure)
     }
-    match (try FileSystem.symbolic_link_metadata(directory + "/movie.mp4")) {
-        success(existing) => {
-            failure = keep_failure((try FileSystem.remove_file(directory + "/movie.mp4")), failure)
+    for name in ["movie.mp4", "audio.f32le"] {
+        match (try FileSystem.symbolic_link_metadata(directory + "/" + name)) {
+            success(existing) => {
+                failure = keep_failure((try FileSystem.remove_file(directory + "/" + name)), failure)
+            }
+            failure(error) => {}
         }
-        failure(error) => {}
     }
     failure = keep_failure((try FileSystem.remove_directory(directory)), failure)
     if let error = failure { return Result<void, str>.failure("could not clean MP4 workspace '" + directory + "': " + error) }

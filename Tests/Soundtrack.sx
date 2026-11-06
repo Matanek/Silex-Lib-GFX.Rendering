@@ -1,0 +1,30 @@
+use GFX.Rendering.Soundtrack.end_frame
+use GFX.Application
+use GFX.Audio
+use GFX.Rendering
+
+test "soundtrack cumulative rounding does not drift at non-divisible rates" {
+    assert(end_frame(0, 59, 44_100) == 0)
+    assert(end_frame(1, 59, 44_100) == 747)
+    assert(end_frame(59, 59, 44_100) == 44_100)
+    assert(end_frame(59 * 3600, 59, 44_100) == 158_760_000)
+    assert(end_frame(600, 59, 44_100) == 448_474)
+    assert(end_frame(1, 65_535, 8000) == 0)
+    match (try end_frame(9_223_372_036_854_775_807, 1, 48_000)) { success(value) => { panic("overflow accepted") }; failure(error) => {} }
+}
+test "soundtrack rejects unsupported channel count before encoder startup" {
+    var audio = Audio.offline(sample_rate:48_000, channels:3)
+    match (try Rendering.export_mp4(Application(1), ".silex/invalid-audio.mp4", 1, "/missing/ffmpeg", audio:audio)) {
+        success(value) => { panic("unsupported soundtrack accepted") }
+        failure(error) => { assert(error == "MP4 soundtrack supports mono or stereo audio") }
+    }
+}
+
+
+test "soundtrack rejects a device mix before encoder startup" {
+    var audio = Audio()
+    match (try Rendering.export_mp4(Application(1), ".silex/invalid-device-audio.mp4", 1, "/missing/ffmpeg", audio:audio)) {
+        success(value) => { panic("device soundtrack accepted") }
+        failure(error) => { assert(error == "render requires Audio.offline") }
+    }
+}

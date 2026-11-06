@@ -1,0 +1,84 @@
+use GFX.Audio
+use GFX.Application
+use GFX.Application.Session
+use STD.File
+use STD.IO
+use STD.Threading
+
+// The timeline owns Audio between samples. The worker owns all rendering and
+// file IO for this interval; polling does not run application update systems.
+package class Soundtrack {
+    private var audio:Audio
+    private var file:File
+    private var session:Session
+    private let sample_rate:int
+    private let video_rate:int
+    private var written:int = 0
+    private var closed:bool = false
+    private var executor:Threading.Executor = Threading.Executor(1)
+
+    init(audio:Audio, file:File, session:Session, video_rate:int) {
+        self.audio = audio
+        self.file = file
+        self.session = session
+        self.sample_rate = audio.output_format().sample_rate
+        self.video_rate = video_rate
+    }
+
+    func sample(application:Application, index:int) Result<void, str> {
+        let target = try end_frame(index + 1, self.video_rate, self.sample_rate) else error { return Result<void, str>.failure(error) }
+        while self.written < target {
+            if !self.session.is_running() { return Result<void, str>.failure("MP4 export cancelled during audio rendering") }
+            var count = target - self.written
+            if count > 4096 { count = 4096 }
+            var job = self.executor.submit(RenderBlock(audio:self.audio, file:self.file, frames:count))
+            while !job.fence().is_complete() { self.session.poll() }
+            let completed = job.complete()
+            if let error = completed.error { return Result<void, str>.failure(error) }
+            self.written += count
+        }
+        return Result<void, str>.success()
+    }
+
+    func close() Result<void, str> {
+        if self.closed { return Result<void, str>.success() }
+        self.closed = true
+        var job = self.executor.submit(CloseTrack(file:self.file))
+        while !job.fence().is_complete() { self.session.poll() }
+        let completed = job.complete()
+        if let error = completed.error { return Result<void, str>.failure(error) }
+        return Result<void, str>.success()
+    }
+    drop { let closed = (try self.close()) }
+}
+
+struct RenderBlock:Threading.Job {
+    var audio:Audio
+    var file:File
+    let frames:int
+    var error:str? = null
+    func execute() {
+        var bytes = try self.audio.render_f32le(self.frames) else error { self.error = error.detail; return }
+        try IO.write_all<File>(self.file, @bytes[0:bytes.count()]) else error { self.error = error.detail; return }
+    }
+}
+
+// floor(index * sample_rate / video_rate), with cumulative integer rounding.
+package func end_frame(index:int, video_rate:int, sample_rate:int) Result<int, str> {
+    if index < 0 || video_rate <= 0 || video_rate > 65_535 || sample_rate <= 0 || sample_rate > 2_147_483_647 { return Result<int, str>.failure("invalid soundtrack timeline") }
+    let whole = index / video_rate
+    let fraction = (index % video_rate) * sample_rate / video_rate
+    if whole > (9_223_372_036_854_775_807 - fraction) / sample_rate { return Result<int, str>.failure("soundtrack duration exceeds the frame range") }
+    return Result<int, str>.success(whole * sample_rate + fraction)
+}
+
+struct CloseTrack:Threading.Job {
+    var file:File
+    var error:str? = null
+    func execute() {
+        let flushed = (try self.file.flush())
+        let closed = (try File.close(self.file))
+        match flushed { failure(error) => { self.error = error.detail }; success => {} }
+        match closed { failure(error) => { if self.error == null { self.error = error.detail } }; success => {} }
+    }
+}

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `export_mp4(..., audio:audio)` includes an Audio.offline mix as synchronized AAC: cumulative rounding, block rendering/writing on a worker, finalization and cleanup of both tracks. Silent exports remain compatible.
+
 - `Renderer.record_mp4` records the composed render while playing: owned session, asynchronous stop/finalization, bounded queue, real duration with duplication and counters, cancellation and recoverable errors. FFmpeg remains explicit; inactive capture performs no transfer.
 
 - `export_mp4` produces a silent video at controlled times with an explicitly selected FFmpeg: MP4/MPEG-4 Part 2/YUV420P, temporary PNG sequence, exclusive output, cancellation and cleanup.

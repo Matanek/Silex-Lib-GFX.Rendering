@@ -10,6 +10,7 @@
     "GFX.ECS": "^0.2.3",
     "GFX.Scene2D": "^0.3.0",
     "GFX.Application": "^0.1.0",
-    "GFX.Physics": "^0.7.0"
+    "GFX.Physics": "^0.7.0",
+    "GFX.Audio": "^0.4.0"
   }
 }

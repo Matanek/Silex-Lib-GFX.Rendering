@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `export_mp4(..., audio:audio)` inclut le mix Audio.offline dans une piste AAC synchronisée : arrondi cumulé, rendu/écriture par blocs sur worker, finalisation et nettoyage des deux pistes. Les exports muets restent compatibles.
+
 - `Renderer.record_mp4` enregistre le rendu composé pendant le jeu : session possédée, arrêt/finalisation asynchrones, file bornée, durée réelle avec duplication et compteurs, annulation et erreurs récupérables. FFmpeg reste explicite ; aucun transfert en capture inactive.
 
 - `export_mp4` produit une vidéo sans son à temps contrôlé avec un FFmpeg explicitement choisi : MP4/MPEG-4 Part 2/YUV420P, séquence PNG temporaire, sortie exclusive, annulation et nettoyage.

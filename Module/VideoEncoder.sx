@@ -88,15 +88,15 @@ package func probe(ffmpeg:str, timeout_seconds:float = 10.0) Result<void, str> {
     return Result<void, str>.success()
 }
 
-package func start(ffmpeg:str, directory:str, frames:int, rate:int) Result<Encoder, str> {
-    // A fixed relative pattern avoids interpreting '%' in a user's directory.
-    return (try spawn(ffmpeg, [
-        "-nostdin", "-hide_banner", "-loglevel", "error",
-        "-framerate", "$(rate)", "-start_number", "0", "-i", "frame-%06d.png",
-        "-frames:v", "$(frames)", "-an", "-c:v", "mpeg4", "-q:v", "2", "-bf", "0",
-        "-pix_fmt", "yuv420p", "-threads", "1", "-filter_threads", "1",
-        "-movflags", "+faststart", "-f", "mp4", "-n", "movie.mp4"
-    ], directory))
+package func start(ffmpeg:str, directory:str, frames:int, rate:int, audio_rate:int = 0, audio_channels:int = 0) Result<Encoder, str> {
+    // Fixed relative inputs never interpret '%' in a user's directory.
+    var arguments:str[] = ["-nostdin", "-hide_banner", "-loglevel", "error",
+        "-framerate", "$(rate)", "-start_number", "0", "-i", "frame-%06d.png"]
+    if audio_rate > 0 {
+        for argument in ["-f", "f32le", "-ar", "$(audio_rate)", "-ac", "$(audio_channels)", "-i", "audio.f32le", "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k"] { arguments.append(argument) }
+    } else { arguments.append("-an") }
+    for argument in ["-frames:v", "$(frames)", "-c:v", "mpeg4", "-q:v", "2", "-bf", "0", "-pix_fmt", "yuv420p", "-threads", "1", "-filter_threads", "1", "-movflags", "+faststart", "-f", "mp4", "-n", "movie.mp4"] { arguments.append(argument) }
+    return (try spawn(ffmpeg, arguments, directory))
 }
 
 func spawn(ffmpeg:str, arguments:str[], directory:str?) Result<Encoder, str> {

@@ -94,3 +94,5 @@ forcé du processus n’est pas garantie.
 [Revenir au rendu](README.md).
 
 Pour filmer une partie au temps réel, utiliser [l’enregistrement interactif](Recording.md).
+
+Une piste applicative optionnelle est décrite dans [Exporter une vidéo avec son](Soundtrack.md).

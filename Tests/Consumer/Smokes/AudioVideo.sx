@@ -1,0 +1,100 @@
+use GFX.Application
+use GFX.Audio
+use GFX.GPU
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use STD.Math
+use STD.Process
+use STD.File
+use STD.FileSystem
+
+class Fixture {
+    let rate:int
+    let mode:str
+    let output:str
+    var playing:Audio.PlayingSound? = null
+    var index:int = -1
+    var pipeline:GPU.GraphicsPipeline? = null
+    var sound:Audio.Sound? = null
+}
+func configure(fixture:&Fixture, audio:&Audio, device:@GPU.Device, surface:@GPU.Surface, renderer:&Rendering.Renderer) {
+    let format = audio.output_format()
+    var samples:float32[] = []
+    var length = format.sample_rate / 20
+    if fixture.mode == "pause" { length = format.sample_rate / 4 }
+    for index in 0...length {
+        samples.append((0.25 * Math.sin(2.0 * Math.pi() * 880.0 * (index as float) / (format.sample_rate as float))) as float32)
+    }
+    fixture.sound = audio.create(@samples[0:samples.count()], sample_rate:format.sample_rate)
+    fixture.pipeline = device.graphics_pipeline(GPU.ShaderProgram.hlsl(file:"../Tests/Shaders/Capture.hlsl", fragment:"overlay_main"), GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+    renderer.add_pass("Soundtrack.Flash", draw)
+}
+func observe(fixture:&Fixture, audio:&Audio, controller:&Application.Controller) {
+    fixture.index++
+    if fixture.mode != "silent" && fixture.index % fixture.rate == 0 {
+        if let sound = fixture.sound {
+            fixture.playing = audio.play(sound)
+            if fixture.mode == "mix" { let second = audio.play(sound, Audio.Playback(volume:0.5)) }
+        }
+    }
+    if fixture.mode == "pause" {
+        if let playing = fixture.playing {
+            if fixture.index % fixture.rate == 3 { audio.pause(playing) }
+            if fixture.index % fixture.rate == 6 { audio.resume(playing) }
+        }
+    }
+    if fixture.mode == "cancel" && fixture.index == 3 { controller.stop() }
+}
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if fixture.index % fixture.rate == 0 {
+        if let pipeline = fixture.pipeline { pass.bind(pipeline); pass.draw(3) }
+    }
+}
+func prepared(application:Application) bool {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if fixture.mode == "conflict-late" { File.write_all(fixture.output, "competing output") }
+    return true
+}
+func main() {
+    let arguments = Process.arguments()
+    assert(arguments.count() >= 3)
+    var rate = 30
+    var sample_rate = 48_000
+    var frames = 60
+    var mode = "normal"
+    if arguments.count() > 3 { mode = arguments[3] }
+    if mode == "fractional" { rate = 29; sample_rate = 44_100; frames = 87 }
+    if mode == "short" { frames = 1 }
+    if mode == "long" { rate = 59; sample_rate = 44_100; frames = 600 }
+    var channels = 2
+    if mode == "mono" { channels = 1 }
+    var audio = Audio.offline(sample_rate:sample_rate, channels:channels)
+    var fixture = Fixture(rate:rate, mode:mode, output:arguments[2])
+    var width = 64
+    if mode == "odd" { width = 63 }
+    var application = Application(1)
+        ..add_resource(fixture)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = width..height = 64..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_system(Application.Schedule.startup, configure)
+        ..add_system(Application.Schedule.update, observe)
+    if mode == "slow" { application.add_plugin(Application.FramePacing(15)) }
+    match (try Rendering.export_mp4(application, arguments[2], frames, ffmpeg:arguments[1], frames_per_second:rate, ready:prepared, audio:audio)) {
+        success(count) => {
+            assert(mode != "cancel" && mode != "encoder-error")
+            assert(count == frames)
+            assert(audio.rendered_frames() == frames / rate * sample_rate + (frames % rate) * sample_rate / rate)
+            print("AUDIOVIDEO frames=$(count) samples=$(audio.rendered_frames()) rate=$(rate) sample_rate=$(sample_rate)")
+        }
+        failure(error) => {
+            print(error)
+            assert(mode == "cancel" || mode == "encoder-error" || mode == "odd" || mode == "conflict" || mode == "conflict-late")
+            if mode != "conflict" && mode != "conflict-late" {
+                match (try FileSystem.metadata(arguments[2])) { success(info) => { panic("failed export published output") }; failure(missing) => {} }
+            }
+        }
+    }
+}

@@ -1,4 +1,7 @@
 use GFX.Application
+use GFX.Audio
+use GFX.Rendering.Soundtrack
+use STD.File
 use GFX.Application.Session
 use GFX.Rendering.Export
 use GFX.Rendering.Plugin as RenderingPlugin
@@ -11,7 +14,7 @@ use STD.Path
 // Its disk use scales with the sequence; memory never accumulates its frames.
 public func export_mp4(
     application:Application, path:str, frames:int, ffmpeg:str,
-    frames_per_second:int = 60, ready:(func(Application) bool)? = null
+    frames_per_second:int = 60, ready:(func(Application) bool)? = null, audio:Audio? = null
 ) Result<int, str> {
     if frames <= 0 || frames_per_second <= 0 {
         return Result<int, str>.failure("MP4 export requires a positive frame count and frame rate")
@@ -21,12 +24,21 @@ public func export_mp4(
     }
     if path == "" { return Result<int, str>.failure("MP4 output path cannot be empty") }
     try Path.validate(path) else error { return Result<int, str>.failure(error.detail) }
+    if var selected = audio {
+        // Reject device playback before starting a window or creating output.
+        let valid = try selected.render(0) else error { return Result<int, str>.failure(error.detail) }
+        let format = selected.output_format()
+        if format.channels < 1 || format.channels > 2 { return Result<int, str>.failure("MP4 soundtrack supports mono or stereo audio") }
+        let duration = try Soundtrack.end_frame(frames, frames_per_second, format.sample_rate) else error { return Result<int, str>.failure(error) }
+        if duration == 0 { return Result<int, str>.failure("MP4 soundtrack requires at least one audio frame") }
+        application.add_resource(selected)
+    }
     try VideoEncoder.probe(ffmpeg) else error { return Result<int, str>.failure(error) }
     let directory = try VideoFiles.prepare(path) else error { return Result<int, str>.failure(error) }
     application.require_plugin(RenderingPlugin())
     var session = Session(application)
     var progress = Export.SequenceProgress()
-    let produced = (try produce(application, session, directory, path, frames, frames_per_second, ffmpeg, ready, progress))
+    let produced = (try produce(application, session, directory, path, frames, frames_per_second, ffmpeg, ready, progress, audio))
     // Cancel/drain any PNG in flight before removing its private directory.
     session.close()
     let cleaned = (try VideoFiles.cleanup(directory, progress.completed))
@@ -48,7 +60,7 @@ public func export_mp4(
 
 func produce(
     application:Application, session:Session, directory:str, path:str, frames:int,
-    rate:int, ffmpeg:str, ready:(func(Application) bool)?, progress:&Export.SequenceProgress
+    rate:int, ffmpeg:str, ready:(func(Application) bool)?, progress:&Export.SequenceProgress, audio:Audio?
 ) Result<void, str> {
     var width = 0
     var height = 0
@@ -60,11 +72,14 @@ func produce(
     if width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0 {
         return Result<void, str>.failure("MPEG-4 YUV420P requires positive even pixel dimensions")
     }
-    let rendered = try Export.render_sequence(application, session, directory, frames, rate, ready, progress, width, height, "MP4") else error {
+    let rendered = try render(application, session, directory, frames, rate, ready, progress, width, height, audio) else error {
         return Result<void, str>.failure(error)
     }
     if !session.is_running() { return Result<void, str>.failure("MP4 export cancelled before encoding") }
-    var encoder = try VideoEncoder.start(ffmpeg, directory, frames, rate) else error {
+    var audio_rate = 0
+    var audio_channels = 0
+    if let selected = audio { let format = selected.output_format(); audio_rate = format.sample_rate; audio_channels = format.channels }
+    var encoder = try VideoEncoder.start(ffmpeg, directory, frames, rate, audio_rate, audio_channels) else error {
         return Result<void, str>.failure(error)
     }
     while true {
@@ -78,4 +93,28 @@ func produce(
     }
     try encoder.result() else error { return Result<void, str>.failure(error) }
     return (try VideoFiles.publish(directory + "/movie.mp4", path, session))
+}
+
+func render(
+    application:Application, session:Session, directory:str, frames:int, rate:int,
+    ready:(func(Application) bool)?, progress:&Export.SequenceProgress,
+    width:int, height:int, audio:Audio?
+) Result<int, str> {
+    if var selected = audio {
+        var file = try File.open(directory + "/audio.f32le", File.OpenOptions(access:File.Access.write, creation:File.Creation.create_new, append:false)) else error { return Result<int, str>.failure(error.detail) }
+        var track = Soundtrack(selected, file, session, rate)
+        let rendered = (try Export.render_sequence(application, session, directory, frames, rate, ready, progress, width, height, "MP4", track.sample))
+        let closed = (try track.close())
+        match rendered {
+            failure(error) => {
+                match closed { failure(cleanup) => { return Result<int, str>.failure(error + "; " + cleanup) }; success => {} }
+                return Result<int, str>.failure(error)
+            }
+            success(count) => {
+                match closed { failure(error) => { return Result<int, str>.failure(error) }; success => {} }
+                return Result<int, str>.success(count)
+            }
+        }
+    }
+    return (try Export.render_sequence(application, session, directory, frames, rate, ready, progress, width, height, "MP4"))
 }
