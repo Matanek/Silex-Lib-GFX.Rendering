@@ -72,7 +72,7 @@ in memory. FFmpeg's own buffers and resources add to that memory.
 
 Events keep being pumped during rendering, encoding and publication.
 An owned job performs the final copy and completes before return.
-This path does not yet provide live recording.
+This path serves offline export; [interactive recording](Recording.md) has its own driver.
 
 ## Errors and cancellation
 
@@ -91,3 +91,5 @@ complete video was created. An unfinished file is never reported as success.
 Recovery after a crash or forced process termination is not guaranteed.
 
 [Back to rendering](README.md).
+
+To record a game in real time, use [interactive recording](Recording.md).

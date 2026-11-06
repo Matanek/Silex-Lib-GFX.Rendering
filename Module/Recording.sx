@@ -1,0 +1,346 @@
+use GFX.GPU
+use GFX.Rendering.RecordingWriter.PrepareRecording
+use GFX.Rendering.RecordingWriter.WriteRecordingFrame
+use GFX.Rendering.VideoFiles
+use STD.FileSystem
+use STD.Math
+use STD.Subprocess
+use STD.Text.UTF8
+use STD.Threading
+use STD.Time.Clock
+
+public enum State { preparing; recording; stopping; completed; failed; cancelled }
+
+public struct Statistics {
+    let frames:int
+    let captured:int
+    let duplicates:int
+    let dropped:int
+    let pending_images:int
+    let peak_pending_images:int
+    let duration_seconds:float
+}
+
+// The renderer owns progress. The consumer owns this result handle and only
+// expresses stop/cancel; no frame, fence, pipe or worker is part of its API.
+public nocopy class Recording {
+    private let output:str
+    private let ffmpeg:str
+    private let rate:int
+    private var current:State = State.preparing
+    private var failure:str? = null
+    private var executor:Threading.Executor? = null
+    private var preparation:Threading.JobHandle<PrepareRecording>? = null
+    private var writer:Threading.JobHandle<WriteRecordingFrame>? = null
+    private var publication:Threading.JobHandle<VideoFiles.PublishMovie>? = null
+    private var child:Subprocess.Child? = null
+    private var status:Subprocess.ExitStatus? = null
+    private var directory:str? = null
+    private var transfer:GPU.Readback? = null
+    private var last_pixels:uint8[] = []
+    private var diagnostics:uint8[] = []
+    private var truncated:bool = false
+    private var width:int = 0
+    private var height:int = 0
+    private var begun:bool = false
+    private var clock:Clock = Clock()
+    private var stop_seconds:float? = null
+    private var cancelled:bool = false
+    private var input_closed:bool = false
+    private var sample_slot:int = -1
+    private var written:int = 0
+    private var captured:int = 0
+    private var duplicated:int = 0
+    private var peak:int = 0
+    private var job_started:float = 0.0
+    private var opaque:bool = true
+    private var deferred_readbacks:int = 0
+
+    package init(path:str, ffmpeg:str, rate:int) {
+        self.output = path
+        self.ffmpeg = ffmpeg
+        self.rate = rate
+        self.executor = Threading.Executor(1)
+    }
+
+    func path() str { return self.output }
+    func state() State { return self.current }
+    func error() str? { return self.failure }
+    func frames_per_second() int { return self.rate }
+    func statistics() Statistics {
+        var pending = 0
+        if self.transfer != null || self.writer != null { pending = 1 }
+        let seconds = self.elapsed()
+        let due = Math.ceil(seconds * (self.rate as float)) as int
+        var dropped = due - self.captured
+        if dropped < 0 { dropped = 0 }
+        return Statistics(frames:self.written, captured:self.captured, duplicates:self.duplicated,
+            dropped:dropped, pending_images:pending, peak_pending_images:self.peak, duration_seconds:seconds)
+    }
+
+    func stop() {
+        if self.terminal() || self.stop_seconds != null { return }
+        self.stop_seconds = self.clock.get_total_seconds()
+        self.current = State.stopping
+    }
+
+    func cancel() {
+        if self.terminal() { return }
+        self.cancelled = true
+        self.stop()
+        self.kill_child()
+    }
+
+    package func terminal() bool {
+        return self.current == State.completed || self.current == State.failed || self.current == State.cancelled
+    }
+
+    package func fail(message:str) {
+        if self.failure == null { self.failure = message }
+        self.stop()
+        self.kill_child()
+    }
+
+    private func elapsed() float {
+        if let seconds = self.stop_seconds { return seconds }
+        return self.clock.get_total_seconds()
+    }
+
+    // One bounded progress call per render. Never join pending work here.
+    package func progress(width:int, height:int) {
+        if self.terminal() { return }
+        if !self.begun {
+            self.begun = true
+            self.width = width
+            self.height = height
+            if self.cancelled || self.stop_seconds != null { self.cancelled = true; self.finish(); return }
+            if width <= 0 || height <= 0 || width % 2 != 0 || height % 2 != 0 {
+                self.fail("MP4 recording requires positive even pixel dimensions")
+                self.finish()
+                return
+            }
+            if var executor = self.executor {
+                self.preparation = executor.submit(PrepareRecording(path:self.output, ffmpeg:self.ffmpeg, width:width, height:height, rate:self.rate))
+            }
+            return
+        }
+        if var handle = self.preparation {
+            if !handle.fence().is_complete() { return }
+            let prepared = handle.complete()
+            self.preparation = null
+            self.directory = prepared.directory
+            self.child = prepared.child
+            if self.stop_seconds != null { self.cancelled = true; self.kill_child() }
+            elif let error = prepared.error { self.fail(error) }
+            else {
+                self.clock.reset()
+                let first = self.clock.tick()
+                self.current = State.recording
+            }
+        }
+        self.poll_child()
+        self.collect_writer()
+        if self.cancelled || self.failure != null {
+            if var transfer = self.transfer { transfer.cancel(); self.transfer = null }
+            self.kill_child()
+            if self.writer == null && self.publication == null { self.finish() }
+            elif self.publication != null { self.collect_publication() }
+            return
+        }
+        if self.publication != null { self.collect_publication(); return }
+        if self.stop_seconds == null && (width != self.width || height != self.height) {
+            self.fail("MP4 recording dimensions changed")
+            return
+        }
+        if self.writer != null {
+            if self.clock.get_total_seconds() - self.job_started > 10.0 { self.fail("MP4 recording image writer timed out") }
+            return
+        }
+        if self.stop_seconds != null { self.progress_stop(); return }
+        if var transfer = self.transfer {
+            if self.deferred_readbacks > 0 { self.deferred_readbacks--; return }
+            if transfer.is_ready() {
+                self.submit_writer(transfer, self.sample_slot)
+                self.transfer = null
+            }
+        }
+    }
+
+    // Owning-package qualification can postpone observation of a real
+    // transfer without occupying a worker or changing its GPU resources.
+    package func defer_readback(frames:int) { self.deferred_readbacks = frames }
+    package func readback_pending() bool { return self.transfer != null }
+    package func writer_pending() bool { return self.writer != null }
+    package func publication_pending() bool { return self.publication != null }
+
+    package func needs_frame() bool {
+        if self.current != State.recording || self.stop_seconds != null || self.writer != null || self.transfer != null { return false }
+        let slot = Math.floor(self.clock.get_total_seconds() * (self.rate as float)) as int
+        return slot > self.sample_slot
+    }
+
+    package func submit(device:@GPU.Device, texture:GPU.Texture, opaque:bool) {
+        if !self.needs_frame() { return }
+        self.opaque = opaque
+        match (try device.read_texture(texture)) {
+            failure(error) => { self.fail(error) }
+            success(transfer) => {
+                self.transfer = transfer
+                self.sample_slot = Math.floor(self.clock.get_total_seconds() * (self.rate as float)) as int
+                self.peak = 1
+            }
+        }
+    }
+
+    private func submit_writer(transfer:GPU.Readback?, last:int) {
+        if var child = self.child {
+            if var executor = self.executor {
+                self.writer = executor.submit(WriteRecordingFrame(
+                    child:child, transfer:transfer, previous:self.last_pixels,
+                    first:self.written, last:last, opaque:self.opaque))
+                self.job_started = self.clock.get_total_seconds()
+            }
+        }
+    }
+
+    private func collect_writer() {
+        if var handle = self.writer {
+            if !handle.fence().is_complete() { return }
+            let done = handle.complete()
+            self.writer = null
+            self.written += done.frames
+            self.duplicated += done.duplicates
+            if done.captured { self.captured++ }
+            if !done.pixels.is_empty() { self.last_pixels = done.pixels }
+            if !self.cancelled { if let error = done.error { self.fail(error) } }
+        }
+    }
+
+    private func poll_child() {
+        if self.status != null { return }
+        if var child = self.child {
+            let next = try child.next_event(0) else error {
+                if !self.cancelled { self.fail("could not observe FFmpeg: " + error.detail) }
+                return
+            }
+            if let event = next {
+                match event {
+                    output(stream, bytes) => {
+                        for byte in bytes {
+                            if self.diagnostics.count() < 16_384 { self.diagnostics.append(byte) }
+                            else { self.truncated = true }
+                        }
+                    }
+                    exited(status) => {
+                        self.status = status
+                        if self.stop_seconds == null { self.fail("FFmpeg exited during recording: " + self.diagnostic()) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func progress_stop() {
+        if var transfer = self.transfer { transfer.cancel(); self.transfer = null }
+        if self.last_pixels.is_empty() { self.fail("MP4 recording stopped before its first image completed"); return }
+        var target = Math.ceil(self.elapsed() * (self.rate as float)) as int
+        if target < 1 { target = 1 }
+        if self.written < target { self.submit_writer(null, target - 1); return }
+        if !self.input_closed {
+            if var child = self.child {
+                try child.close_standard_input() else error { self.fail(error.detail); return }
+            }
+            self.input_closed = true
+            self.job_started = self.clock.get_total_seconds()
+        }
+        if let status = self.status {
+            match status {
+                exited(code) => { if code != 0 { self.fail("FFmpeg exited with code $(code): " + self.diagnostic()); return } }
+                signaled(signal) => { self.fail("FFmpeg terminated by signal $(signal): " + self.diagnostic()); return }
+            }
+            if let directory = self.directory {
+                if var executor = self.executor {
+                    self.publication = executor.submit(VideoFiles.PublishMovie(source:directory + "/movie.mp4", destination:self.output))
+                }
+            }
+        } elif self.clock.get_total_seconds() - self.job_started > 10.0 {
+            self.fail("MP4 recording encoder finalization timed out")
+        }
+    }
+
+    private func collect_publication() {
+        if var handle = self.publication {
+            if !handle.fence().is_complete() { return }
+            let done = handle.complete()
+            self.publication = null
+            if !self.cancelled { if let error = done.error { self.fail(error) } }
+            if (self.cancelled || self.failure != null) && done.created {
+                try FileSystem.remove_file(self.output) else error {
+                    self.failure = "could not remove partial MP4: " + error.detail
+                    self.finish()
+                    return
+                }
+            }
+            self.finish()
+        }
+    }
+
+    private func kill_child() {
+        if var child = self.child {
+            let terminated = (try child.terminate(force:true))
+        }
+    }
+
+    private func finish() {
+        // A live cancellation never invokes Child.drop while it could waitpid.
+        // progress drains one nonblocking event per render until exit is known.
+        if self.child != null && self.status == null { return }
+        // All accepted worker jobs have completed before their handles close.
+        self.child = null
+        if let directory = self.directory {
+            try VideoFiles.cleanup(directory, 0) else error {
+                if let original = self.failure { self.failure = original + "; " + error }
+                else { self.failure = error }
+                self.directory = null
+                self.current = State.failed
+                self.last_pixels = []
+                self.executor = null
+                return
+            }
+        }
+        self.directory = null
+        self.last_pixels = []
+        self.executor = null
+        if self.failure != null { self.current = State.failed }
+        elif self.cancelled { self.current = State.cancelled }
+        else { self.current = State.completed }
+    }
+
+    private func diagnostic() str {
+        var text = "<non UTF-8 diagnostic>"
+        match (try UTF8.decode(@self.diagnostics[0:self.diagnostics.count()])) {
+            success(value) => { text = value }
+            failure(error) => {}
+        }
+        if self.truncated { text += " [diagnostic truncated]" }
+        return text
+    }
+
+    package func shutdown() {
+        if self.terminal() { return }
+        self.cancel()
+        if var executor = self.executor { executor.wait_idle() }
+        self.progress(self.width, self.height)
+        self.kill_child()
+        if var executor = self.executor { executor.wait_idle() }
+        self.progress(self.width, self.height)
+        if !self.terminal() {
+            // Only application shutdown may synchronously reap an already
+            // killed child; no writer/publication job still owns its handles.
+            self.child = null
+            self.finish()
+        }
+    }
+
+    drop { self.shutdown() }
+}

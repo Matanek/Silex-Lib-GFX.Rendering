@@ -1,0 +1,90 @@
+use GFX.Application
+use GFX.GPU
+use GFX.Input
+use GFX.Input.State as InputState
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use STD.Math
+use STD.Process
+use STD.Time.Clock
+
+class Fixture {
+    let mode:str
+    let ffmpeg:str
+    let output:str
+    var pipeline:GPU.GraphicsPipeline? = null
+    var recording:Rendering.Recording? = null
+    var frames:int = 0
+    var held:int = 0
+    var inputs:int = 0
+    var clock:Clock = Clock()
+}
+func configure(fixture:&Fixture, renderer:&Rendering.Renderer, device:@GPU.Device, surface:@GPU.Surface) {
+    fixture.pipeline = device.graphics_pipeline(
+        GPU.ShaderProgram.hlsl(file:"../Consumer/Tests/Shaders/Capture.hlsl", fragment:"overlay_main"),
+        GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+    renderer.add_pass("Recording.Progress", draw)
+    fixture.recording = renderer.record_mp4(fixture.output, ffmpeg:fixture.ffmpeg)
+    if var recording = fixture.recording { recording.defer_readback(60) }
+    let first = fixture.clock.tick()
+}
+// A stage-level input double; the GFX-owned smoke separately injects native SDL
+// events while an actual pipe writer is blocked.
+func enter(state:&InputState) { state.entered_keys = [Input.Key.d] }
+func observe(fixture:&Fixture, input:@Input, controller:&Application.Controller) {
+    fixture.frames++
+    if var recording = fixture.recording {
+        let stats = recording.statistics()
+        assert(stats.pending_images <= 1 && stats.peak_pending_images <= 1)
+        if recording.readback_pending() && !recording.writer_pending() && stats.captured == 0 {
+            fixture.held++
+            assert(input.is_pressed(Input.Key.d))
+            fixture.inputs++
+            assert(stats.captured == 0, "held readback must not occupy the encoder")
+            if fixture.mode == "cancel" && fixture.held == 30 { recording.cancel() }
+            if fixture.mode == "early-stop" && fixture.held == 2 { recording.stop() }
+        }
+        if fixture.mode == "cancel-publication" && recording.publication_pending() { recording.cancel() }
+        if recording.state() == Rendering.Recording.State.recording && stats.captured >= 1 { recording.stop() }
+        if recording.state() == Rendering.Recording.State.completed {
+            assert(fixture.mode == "complete" && fixture.held >= 60 && fixture.inputs == fixture.held)
+            assert(stats.duplicates >= 25 && stats.frames == stats.captured + stats.duplicates)
+            print("HELD frames=$(fixture.frames) held=$(fixture.held) inputs=$(fixture.inputs) encoded=$(stats.frames) duplicated=$(stats.duplicates) seconds=$(stats.duration_seconds)")
+            controller.stop()
+        }
+        if recording.state() == Rendering.Recording.State.cancelled {
+            assert((fixture.mode == "cancel" || fixture.mode == "cancel-publication") && stats.pending_images == 0)
+            print("HELD cancelled frames=$(fixture.frames) inputs=$(fixture.inputs)")
+            controller.stop()
+        }
+        if recording.state() == Rendering.Recording.State.failed {
+            assert(fixture.mode == "early-stop" && stats.captured == 0)
+            if let error = recording.error() { assert(error == "MP4 recording stopped before its first image completed"); print(error) }
+            else { panic("failed recording has no error") }
+            controller.stop()
+        }
+    }
+    assert(fixture.clock.get_total_seconds() < 15.0)
+}
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if let pipeline = fixture.pipeline {
+        pass.scissor(20, 32, 16, 16)
+        pass.bind(pipeline)
+        pass.draw(3)
+    }
+}
+func main() {
+    let arguments = Process.arguments()
+    assert(arguments.count() == 4)
+    Application(1)
+        ..add_resource(Fixture(mode:arguments[1], ffmpeg:arguments[2], output:arguments[3]))
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = 320..height = 96..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_plugin(Application.FramePacing(60))
+        ..add_system(Application.Schedule.startup, configure)
+        ..add_system(Application.Schedule.update, enter)
+        ..add_system(Application.Schedule.update, observe)
+        ..run()
+}

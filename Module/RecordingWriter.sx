@@ -1,0 +1,81 @@
+use GFX.GPU
+use GFX.Rendering.VideoEncoder
+use GFX.Rendering.VideoFiles
+use STD.Subprocess
+use STD.Threading
+
+package struct PrepareRecording:Threading.Job {
+    let path:str
+    let ffmpeg:str
+    let width:int
+    let height:int
+    let rate:int
+    var directory:str? = null
+    var child:Subprocess.Child? = null
+    var error:str? = null
+
+    func execute() {
+        try VideoEncoder.probe(self.ffmpeg) else error { self.error = error; return }
+        let directory = try VideoFiles.prepare(self.path) else error { self.error = error; return }
+        self.directory = directory
+        self.child = try Subprocess.spawn(Subprocess.SpawnCommand(
+            executable:self.ffmpeg,
+            arguments:["-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "rawvideo", "-pixel_format", "rgba",
+                "-video_size", "$(self.width)x$(self.height)", "-framerate", "$(self.rate)",
+                "-i", "pipe:0", "-an", "-c:v", "mpeg4", "-q:v", "2", "-bf", "0",
+                "-pix_fmt", "yuv420p", "-threads", "1", "-filter_threads", "1",
+                "-movflags", "+faststart", "-f", "mp4", "-n", "movie.mp4"],
+            current_directory:directory, inherit_environment:false, environment:[]
+        )) else error { self.error = "could not start FFmpeg: " + error.detail; return }
+    }
+}
+
+// One writer owns all stdin mutation. The render thread only drains output
+// and can terminate the child; it never closes stdin while this job exists.
+package struct WriteRecordingFrame:Threading.Job {
+    var child:Subprocess.Child
+    var transfer:GPU.Readback?
+    let previous:uint8[]
+    let first:int
+    let last:int
+    let opaque:bool
+    var pixels:uint8[] = []
+    var frames:int = 0
+    var duplicates:int = 0
+    var captured:bool = false
+    var error:str? = null
+
+    func execute() {
+        if var transfer = self.transfer {
+            self.pixels = try transfer.read() else error { self.error = error; return }
+            self.captured = true
+            if self.opaque {
+                var index = 3
+                while index < self.pixels.count() { self.pixels[index] = 255 as uint8; index += 4 }
+            }
+        } else { self.pixels = self.previous }
+        for index in self.first...self.last + 1 {
+            var image = self.previous
+            let new_image = self.captured && index == self.last
+            if image.is_empty() || new_image { image = self.pixels }
+            if image.is_empty() { self.error = "recording has no image to encode"; return }
+            try write_frame(self.child, image) else error { self.error = error; return }
+            self.frames++
+            if !new_image { self.duplicates++ }
+        }
+    }
+}
+
+func write_frame(child:Subprocess.Child, pixels:@uint8[]) Result<void, str> {
+    var process = child
+    var offset = 0
+    while offset < pixels.count() {
+        let count = try process.write_standard_input(@pixels[offset:pixels.count()]) else error {
+            return Result<void, str>.failure("could not feed FFmpeg: " + error.detail)
+        }
+        if count <= 0 { return Result<void, str>.failure("FFmpeg accepted no input bytes") }
+        offset += count
+    }
+    return Result<void, str>.success()
+}

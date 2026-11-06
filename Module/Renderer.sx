@@ -6,6 +6,7 @@ use GFX.Rendering.Stats
 use GFX.Rendering.Capture.Capture
 use GFX.Rendering.Capture.CaptureQueue
 use GFX.Window
+use GFX.Rendering.Recording.Recording
 use STD.Path
 
 struct RegisteredPass {
@@ -29,6 +30,7 @@ public class Renderer {
     private var depth_width:int
     private var depth_height:int
     private var captures:CaptureQueue? = null
+    private var recording:Recording? = null
 
     init(
         clear:Color = Color(r:0.055, g:0.075, b:0.105, a:1.0),
@@ -70,9 +72,30 @@ public class Renderer {
         return Result<Capture, str>.failure("could not create the capture queue")
     }
 
+    func record_mp4(path:str, ffmpeg:str, frames_per_second:int = 30) Result<Recording, str> {
+        if frames_per_second <= 0 || frames_per_second > 65_535 { return Result<Recording, str>.failure("MP4 recording rate must be between 1 and 65535 Hz") }
+        if path == "" { return Result<Recording, str>.failure("MP4 output path cannot be empty") }
+        try Path.validate(path) else error { return Result<Recording, str>.failure(error.detail) }
+        let absolute = try Path.is_absolute(ffmpeg) else error { return Result<Recording, str>.failure(error.detail) }
+        if !absolute { return Result<Recording, str>.failure("FFmpeg requires an explicit absolute executable path") }
+        if var previous = self.recording {
+            if !previous.terminal() { return Result<Recording, str>.failure("an MP4 recording is already pending") }
+        }
+        var recording = Recording(path, ffmpeg, frames_per_second)
+        self.recording = recording
+        return Result<Recording, str>.success(recording)
+    }
+
     module func close_captures() {
+        if var recording = self.recording { recording.shutdown() }
+        self.recording = null
         if var captures = self.captures { captures.close() }
         self.captures = null
+    }
+
+    private func fail_capture(error:str) {
+        if var captures = self.captures { captures.fail(error) }
+        if var recording = self.recording { recording.fail(error) }
     }
 
     package func requires_depth() bool { return self.needs_depth }
@@ -117,10 +140,16 @@ public class Renderer {
         var depth_target:GPU.DepthTarget? = null
         var window = application.resources().get<Window>()
         let size = window.pixel_size()
-        var capture_frame = false
+        var video_frame = false
+        if var recording = self.recording {
+            recording.progress(size.x as int, size.y as int)
+            if recording.terminal() { self.recording = null }
+            else { video_frame = recording.needs_frame() }
+        }
+        var capture_frame = video_frame
         if var captures = self.captures {
             captures.progress()
-            capture_frame = captures.needs_frame()
+            capture_frame = capture_frame || captures.needs_frame()
             if capture_frame {
                 let format = surface.format()
                 let width = size.x as int
@@ -131,6 +160,13 @@ public class Renderer {
                 }
             }
         }
+        if video_frame {
+            if let error = capture_error(surface.format(), size.x as int, size.y as int) {
+                if var recording = self.recording { recording.fail(error) }
+                capture_frame = false
+                video_frame = false
+            }
+        }
         match (try self.ensure_color(
             device,
             surface.format(),
@@ -139,7 +175,7 @@ public class Renderer {
             capture_frame
         )) {
             failure(error) => {
-                if var captures = self.captures { captures.fail(error) }
+                self.fail_capture(error)
                 capture_frame = false
                 self.ensure_color(device, surface.format(), size.x as int, size.y as int)
             }
@@ -156,7 +192,7 @@ public class Renderer {
                     name:"GFX resolved capture"
                 ))) {
                     failure(error) => {
-                        if var captures = self.captures { captures.fail(error) }
+                        self.fail_capture(error)
                         capture_frame = false
                     }
                     success(texture) => { capture_output = texture }
@@ -194,7 +230,7 @@ public class Renderer {
                     if let output = capture_output {
                         match (try commands.present(output, surface)) {
                             failure(error) => {
-                                if var captures = self.captures { captures.fail(error) }
+                                self.fail_capture(error)
                             }
                             success(available) => {
                                 if !available {
@@ -239,7 +275,7 @@ public class Renderer {
         match (try commands.submit()) {
             failure(error) => {
                 if capture_frame {
-                    if var captures = self.captures { captures.fail(error) }
+                    self.fail_capture(error)
                     return
                 }
                 panic(error)
@@ -248,6 +284,7 @@ public class Renderer {
         }
         if let output = capture_output {
             if var captures = self.captures { captures.submit(device, output, self.presentation) }
+            if var recording = self.recording { recording.submit(device, output, self.presentation) }
         }
         self.current_stats.record_frame(graph.plan_count(), device.command_stats())
     }

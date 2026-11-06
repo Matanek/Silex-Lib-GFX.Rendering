@@ -73,7 +73,7 @@ package func publish(source:str, destination:str, session:Session) Result<void, 
     return Result<void, str>.success()
 }
 
-struct PublishMovie:Threading.Job {
+package struct PublishMovie:Threading.Job {
     let source:str
     let destination:str
     var created:bool = false

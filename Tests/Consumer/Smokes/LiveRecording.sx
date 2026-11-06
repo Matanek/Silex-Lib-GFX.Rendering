@@ -1,0 +1,101 @@
+use GFX.Application
+use GFX.ECS
+use GFX.GPU
+use GFX.Rendering
+use GFX.Window.Plugin as WindowPlugin
+use STD.Process
+use STD.Math
+use STD.File
+use STD.FileSystem
+use GFX.Window
+use STD.Time.Clock
+
+class Fixture {
+    let ffmpeg:str
+    let output:str
+    var pipeline:GPU.GraphicsPipeline? = null
+    var recording:Rendering.Recording? = null
+    let mode:str = "normal"
+    var frames:int = 0
+    var terminal_frames:int = 0
+    var clock:Clock = Clock()
+}
+func configure(fixture:&Fixture, renderer:&Rendering.Renderer, device:@GPU.Device, surface:@GPU.Surface) {
+    fixture.pipeline = device.graphics_pipeline(
+        GPU.ShaderProgram.hlsl(file:"../Tests/Shaders/Capture.hlsl", fragment:"overlay_main"),
+        GPU.GraphicsPipelineSettings(color_targets:[GPU.ColorTargetFormat(format:surface.format())]))
+    renderer.add_pass("Live.Marker", draw)
+    fixture.recording = renderer.record_mp4(fixture.output, ffmpeg:fixture.ffmpeg, frames_per_second:30)
+    let first = fixture.clock.tick()
+}
+func observe(fixture:&Fixture, controller:&Application.Controller, window:&Window) {
+    fixture.frames++
+    if var recording = fixture.recording {
+        let stats = recording.statistics()
+        if fixture.mode == "cancel-prepare" && fixture.frames == 2 { recording.cancel() }
+        if recording.state() == Rendering.Recording.State.recording {
+            if fixture.mode == "resize" && stats.duration_seconds > 0.1 { window.resize(STD.Math.Vec2(322.0, 96.0)) }
+            if fixture.mode == "cancel" && stats.duration_seconds > 0.2 { recording.cancel() }
+            if fixture.mode == "shutdown" && stats.duration_seconds > 0.2 { controller.stop() }
+            if fixture.mode == "short" && stats.captured >= 1 { recording.stop() }
+            if fixture.mode == "conflict-late" && stats.duration_seconds > 0.1 { File.write_all(fixture.output, "preserve competing output"); recording.stop() }
+            if fixture.mode == "normal" && stats.duration_seconds >= 1.0 { recording.stop() }
+        }
+        if recording.state() == Rendering.Recording.State.failed {
+            assert(fixture.mode == "resize" || fixture.mode == "encoder-error" || fixture.mode == "conflict" || fixture.mode == "conflict-late" || fixture.mode == "odd", "unexpected recording failure")
+            if let error = recording.error() { print(error) } else { panic("recording failed without an error") }
+            controller.stop()
+        }
+        if recording.state() == Rendering.Recording.State.cancelled {
+            assert(fixture.mode == "cancel" || fixture.mode == "cancel-prepare")
+            assert(recording.error() == null && stats.pending_images == 0)
+            fixture.terminal_frames++
+            if fixture.terminal_frames >= 3 { controller.stop() }
+        }
+        if recording.state() == Rendering.Recording.State.completed {
+            assert(fixture.mode == "normal" || fixture.mode == "short")
+            assert(Math.abs((stats.frames as float) / 30.0 - stats.duration_seconds) <= 1.0 / 30.0 + 0.0001)
+            assert(stats.frames == stats.captured + stats.duplicates)
+            assert(stats.peak_pending_images == 1 && stats.pending_images == 0)
+            assert(fixture.frames > stats.captured)
+            print("LIVE frames=$(stats.frames) captured=$(stats.captured) duplicate=$(stats.duplicates) dropped=$(stats.dropped) seconds=$(stats.duration_seconds) rendered=$(fixture.frames)")
+            controller.stop()
+        }
+    }
+    assert(fixture.clock.get_total_seconds() < 20.0, "live recording did not finish")
+}
+func draw(pass:@GPU.RenderPass, application:@Application) {
+    var resources = application.resources()
+    let fixture = resources.get<Fixture>()
+    if let pipeline = fixture.pipeline {
+        var elapsed = 0.0
+        if let recording = fixture.recording { elapsed = recording.statistics().duration_seconds }
+        let x = 8 + (Math.floor(Math.min(240.0, elapsed * 240.0)) as int)
+        pass.scissor(x, 32, 16, 16)
+        pass.bind(pipeline)
+        pass.draw(3)
+    }
+}
+func main() {
+    let arguments = Process.arguments()
+    assert(arguments.count() >= 3, "usage: live-consumer <absolute-ffmpeg> <new-mp4>")
+    var mode = "normal"
+    if arguments.count() > 3 { mode = arguments[3] }
+    var fixture = Fixture(ffmpeg:arguments[1], output:arguments[2], mode:mode)
+    var width = 320
+    if mode == "odd" { width = 321 }
+    Application(1)
+        ..add_resource(fixture)
+        ..add_plugin(WindowPlugin(WindowPlugin.Settings()..width = width..height = 96..hidden = true..high_pixel_density = false))
+        ..add_plugin(Rendering.Plugin(Rendering.Plugin.Settings(antialiasing:Rendering.Antialiasing.none, presentation:false)))
+        ..add_plugin(Application.FramePacing(60))
+        ..add_system(Application.Schedule.startup, configure)
+        ..add_system(Application.Schedule.update, observe)
+        ..run()
+    if mode != "normal" && mode != "short" && mode != "conflict" && mode != "conflict-late" {
+        match (try FileSystem.metadata(arguments[2])) {
+            success(info) => { panic("failed or cancelled recording published a file") }
+            failure(error) => {}
+        }
+    }
+}

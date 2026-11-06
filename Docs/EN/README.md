@@ -104,6 +104,10 @@ For a complete PNG sequence at a chosen frame rate, see [Export an animation](Ex
 
 To produce a silent file directly with an explicit encoder, see [Export an animation as MP4](Video.md).
 
+## Record a game
+
+To start and stop a video while playing, read [Record a game](Recording.md).
+
 ## Read frame statistics
 
 `Rendering.Stats` reports GPU work submitted for the completed frame. The

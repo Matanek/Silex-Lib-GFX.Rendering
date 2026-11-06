@@ -72,7 +72,7 @@ Les buffers et ressources propres au processus FFmpeg s’ajoutent à cette mém
 
 Les événements restent pompés pendant le rendu, l’encodage et la publication.
 La copie finale est exécutée par un job possédant ses ressources ; elle se termine
-avant le retour. Ce parcours ne constitue pas encore un enregistrement temps réel.
+avant le retour. Ce parcours sert à l’export hors ligne ; l’[enregistrement interactif](Recording.md) possède son propre pilote.
 
 ## Erreurs et annulation
 
@@ -92,3 +92,5 @@ inachevé n’est annoncé comme une réussite. La récupération après crash o
 forcé du processus n’est pas garantie.
 
 [Revenir au rendu](README.md).
+
+Pour filmer une partie au temps réel, utiliser [l’enregistrement interactif](Recording.md).

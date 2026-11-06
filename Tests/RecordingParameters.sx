@@ -1,0 +1,38 @@
+use GFX.Rendering
+
+func rejects(path:str, encoder:str, rate:int) {
+    var renderer = Rendering.Renderer()
+    match (try renderer.record_mp4(path, ffmpeg:encoder, frames_per_second:rate)) {
+        success(recording) => { panic("invalid recording accepted") }
+        failure(error) => { assert(error != "") }
+    }
+}
+test "recording rejects invalid frame rates and output paths" {
+    let rates:int[] = [-1, 0, 65_536]
+    for rate in rates { rejects("movie.mp4", "/missing/ffmpeg", rate) }
+    rejects("", "/missing/ffmpeg", 30)
+    rejects("bad\0path.mp4", "/missing/ffmpeg", 30)
+}
+test "recording requires an explicit absolute encoder path" {
+    rejects("movie.mp4", "ffmpeg", 30)
+    rejects("movie.mp4", "", 30)
+}
+test "recording permits one session and cancellation before preparation" {
+    var renderer = Rendering.Renderer()
+    var recording = renderer.record_mp4("movie.mp4", ffmpeg:"/missing/ffmpeg")
+    assert(recording.state() == Rendering.Recording.State.preparing)
+    assert(recording.frames_per_second() == 30 && recording.path() == "movie.mp4")
+    match (try renderer.record_mp4("second.mp4", ffmpeg:"/missing/ffmpeg")) {
+        success(second) => { panic("overlapping recording accepted") }
+        failure(error) => { assert(error == "an MP4 recording is already pending") }
+    }
+    recording.cancel()
+    recording.progress(64, 64)
+    assert(recording.state() == Rendering.Recording.State.cancelled && recording.error() == null)
+    let stats = recording.statistics()
+    assert(stats.frames == 0 && stats.captured == 0 && stats.pending_images == 0)
+    var second = renderer.record_mp4("second.mp4", ffmpeg:"/missing/ffmpeg")
+    second.stop()
+    second.progress(64, 64)
+    assert(second.state() == Rendering.Recording.State.cancelled)
+}

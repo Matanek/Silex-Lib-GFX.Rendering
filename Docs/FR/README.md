@@ -108,6 +108,10 @@ Pour produire une séquence PNG complète à cadence choisie, lire [Exporter une
 
 Pour produire directement un fichier sans son avec un encodeur explicite, lire [Exporter une animation en MP4](Video.md).
 
+## Enregistrer une partie
+
+Pour démarrer et arrêter une vidéo pendant le jeu, lire [Enregistrer une partie](Recording.md).
+
 ## Lire les statistiques de frame
 
 `Rendering.Stats` rapporte le travail GPU soumis pour la frame terminée. Les
