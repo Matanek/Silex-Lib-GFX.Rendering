@@ -37,9 +37,10 @@ mix only from controlled systems, without concurrent access from another thread
 or native callback during collection. The exporter keeps its reference until
 return.
 
-The `audio` parameter is optional: existing calls remain silent. The
-[real-time recording path](Recording.md) is still silent; this option qualifies
-controlled export only.
+The `audio` parameter is optional: existing calls remain silent.
+To [record in real time with audio](Recording.md), pass a device mix to
+`Renderer.record_mp4(..., audio:audio)`. The offline mix in this guide serves
+controlled export.
 
 ## Timeline and ending
 

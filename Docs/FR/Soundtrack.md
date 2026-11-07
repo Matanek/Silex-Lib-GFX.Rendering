@@ -37,9 +37,10 @@ le font pas avancer. Manipuler ce mix depuis les systèmes contrôlés uniquemen
 sans accès concurrent depuis un autre thread ou un callback natif pendant sa
 collecte. L’exporteur garde sa référence jusqu’au retour.
 
-Le paramètre `audio` est optionnel : les appels existants restent muets. Le
-parcours [d’enregistrement au temps réel](Recording.md) est encore muet ; cette
-option qualifie uniquement l’export contrôlé.
+Le paramètre `audio` est optionnel : les appels existants restent muets.
+Pour [enregistrer au temps réel avec du son](Recording.md), fournir un mix avec
+périphérique à `Renderer.record_mp4(..., audio:audio)`. Le mix hors ligne de ce
+guide sert à l’export contrôlé.
 
 ## Chronologie et fin
 
