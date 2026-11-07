@@ -1,6 +1,6 @@
 # Save a frame as PNG
 
-This capability in development saves the next complete `Rendering.Renderer`
+PNG capture saves the next complete `Rendering.Renderer`
 render, after its passes and MSAA resolution. The PNG includes scenes and
 overlays composed in that renderer. It does not access the desktop, window
 decorations or external native views such as WebView.
@@ -75,5 +75,7 @@ name; an existing name causes a recoverable error.
 The [consumer tests](../../Tests/Consumer/Tests/Capture.sx) reload PNGs and check
 pixels, dimensions, MSAA, resizing and errors. The
 [lifecycle tests](../../Tests/Consumer/Tests/CaptureLifecycle.sx) cover cancellation
-and shutdown with work in flight. This capture does not yet provide controlled
-animation export or video recording.
+and shutdown with work in flight. For an image sequence, follow
+[controlled export](Export.md). The [MP4 video](Video.md),
+[interactive recording](Recording.md) and [application audio](Soundtrack.md)
+guides describe the video workflows.

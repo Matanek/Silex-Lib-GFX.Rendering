@@ -1,6 +1,6 @@
 # Enregistrer une frame en PNG
 
-Cette capacité en développement conserve le prochain rendu complet de
+La capture PNG conserve le prochain rendu complet de
 `Rendering.Renderer`, après ses passes et la résolution du MSAA. Le PNG contient
 les scènes et surimpressions composées dans ce renderer. Aucun accès au bureau,
 aux décorations de fenêtre ni aux vues natives externes telles que WebView.
@@ -76,5 +76,7 @@ emploie le nom suivant ; un nom existant provoque une erreur récupérable.
 Les [tests consommateurs](../../Tests/Consumer/Tests/Capture.sx) rechargent les
 PNG et vérifient pixels, dimensions, MSAA, resize et erreurs. Les
 [tests de cycle de vie](../../Tests/Consumer/Tests/CaptureLifecycle.sx) couvrent
-annulation et fermeture avec opérations en vol. Cette capture ne constitue pas
-encore un export d'animation à temps contrôlé ni un enregistrement vidéo.
+annulation et fermeture avec opérations en vol. Pour une suite d’images, suivre
+[l’export à temps contrôlé](Export.md). Les guides [vidéo MP4](Video.md),
+[enregistrement interactif](Recording.md) et [audio applicatif](Soundtrack.md)
+présentent les parcours vidéo.
