@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.0] - 2026-11-08
+## [0.5.0] - 2026-11-09
 
 - `record_mp4(..., audio:audio)` includes the device mix with a bounded queue and separate audio worker, integer timeline, AAC mux without video re-encoding, and explicit overflow or clock-mismatch failure.
 

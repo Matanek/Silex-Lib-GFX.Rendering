@@ -1,6 +1,6 @@
 # Historique des changements
 
-## [0.5.0] - 2026-11-08
+## [0.5.0] - 2026-11-09
 
 - `record_mp4(..., audio:audio)` inclut le mix du périphérique avec file bornée et worker audio distinct, chronologie entière, mux AAC sans réencodage vidéo et échec explicite en cas de saturation ou d’horloge incohérente.
 
